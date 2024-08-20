@@ -39,4 +39,5 @@ jobs:
       - name: Upload distributions to blob container
         env:
           AZCOPY_AUTO_LOGIN_TYPE: AZCLI
+          AZCOPY_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: azcopy copy 'dist/' "https://kyleknappgithubdemo.blob.core.windows.net/drops/azstoragetorch/python/$AZSTORAGETORCH_VERSION/" --recursive
