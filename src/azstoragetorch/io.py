@@ -65,8 +65,10 @@ class BlobIO(io.IOBase):
         return self._read(size)
 
     def readable(self) -> bool:
-        self._validate_not_closed()
-        return self._mode == "rb"
+        if self._mode == "rb":
+            self._validate_not_closed()
+            return True
+        return False
 
     def readline(self, size: Optional[int] = -1, /) -> bytes:
         # BaseIO includes a default implementation of readline() that calls
