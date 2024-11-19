@@ -15,6 +15,8 @@ from azure.core.credentials import (
     TokenCredential,
 )
 
+import azstoragetorch.downloaders
+
 
 _SUPPORTED_MODES = Literal["rb"]
 _SDK_CREDENTIAL_TYPE = Optional[
@@ -27,19 +29,22 @@ _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
+    _BLOB_DOWNLOADER_CLS = azstoragetorch.downloaders.BaseBlobDownloader
+
     def __init__(
         self,
         blob_url: str,
         mode: _SUPPORTED_MODES,
         *,
         credential: _AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        _downloader_cls = None
     ):
         self._blob_url = blob_url
         self._validate_mode(mode)
         self._mode = mode
         self._sdk_credential = self._get_sdk_credential(blob_url, credential)
 
-        self._blob_downloader = self._get_blob_downloader()
+        self._blob_downloader = self._get_blob_downloader(_downloader_cls)
         self._position = 0
         self._closed = False
 
@@ -139,8 +144,10 @@ class BlobIO(io.IOBase):
         # key to determine if the URL has a SAS token.
         return "sig" in parsed_qs
 
-    def _get_blob_downloader(self) -> "_BlobDownloader":
-        return _BlobDownloader(self._blob_url, self._sdk_credential)
+    def _get_blob_downloader(self, downloader_cls) -> "azstoragetorch.downloaders.BaseBlobDownloader":
+        if downloader_cls is None:
+            downloader_cls = self._BLOB_DOWNLOADER_CLS
+        return downloader_cls(self._blob_url, self._sdk_credential)
 
     def _read(self, size: Optional[int]) -> bytes:
         if size == 0 or self._position >= self._blob_downloader.get_blob_size():
@@ -173,18 +180,3 @@ class BlobIO(io.IOBase):
     def _close_blob_downloader(self) -> None:
         if not self._closed:
             self._blob_downloader.close()
-
-
-class _BlobDownloader:
-    def __init__(self, blob_url: str, sdk_credential: _SDK_CREDENTIAL_TYPE):
-        self._blob_url = blob_url
-        self._sdk_credential = sdk_credential
-
-    def get_blob_size(self) -> int:
-        raise NotImplementedError("get_blob_size")
-
-    def download(self, offset: int = 0, length: Optional[int] = None) -> bytes:
-        raise NotImplementedError("download")
-
-    def close(self) -> None:
-        raise NotImplementedError("close")

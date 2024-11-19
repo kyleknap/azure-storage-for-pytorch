@@ -1,0 +1,4 @@
+name: blobio-process
+blobio-impl:
+  module: process
+  class: ProcessPoolDownloader

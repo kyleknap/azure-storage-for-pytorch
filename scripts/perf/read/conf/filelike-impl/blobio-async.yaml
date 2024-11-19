@@ -1,0 +1,4 @@
+name: blobio-async
+blobio-impl:
+  module: aio
+  class: AsyncSDKDownloader

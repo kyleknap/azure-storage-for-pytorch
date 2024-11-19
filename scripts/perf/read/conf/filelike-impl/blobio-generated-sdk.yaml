@@ -1,0 +1,4 @@
+name: blobio-generated-sdk
+blobio-impl:
+  module: thread
+  class: GeneratedSDKDownloader
