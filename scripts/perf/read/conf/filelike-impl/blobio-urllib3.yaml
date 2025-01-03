@@ -1,4 +1,4 @@
-name: blobio-sdk
+name: blobio-urlib3
 blobio-impl:
   module: thread
   class: Urllib3Downloader

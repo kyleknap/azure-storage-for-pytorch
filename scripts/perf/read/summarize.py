@@ -15,7 +15,6 @@ def summarize(output_dir):
     results_dirs = _get_results_dirs(output_dir)
     for result_dir in results_dirs:
         num_runs = _add_result_dir_to_tables(result_dir, tables)
-    print(tables)
     _display_tables(tables, num_runs)
 
 
