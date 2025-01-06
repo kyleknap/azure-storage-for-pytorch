@@ -15,6 +15,8 @@ class AsyncSDKDownloader(BaseBlobDownloader):
             blob_url,
             credential=sdk_credential,
             connection_data_block_size=self._CONNECTION_DATA_BLOCK_SIZE,
+            max_single_get_size=4 * 1024 * 1024,
+            max_chunk_get_size=8 * 1024 * 1024,
         )
         self._blob_size = None
         self._runner = asyncio.Runner()
