@@ -4,6 +4,8 @@
 # license information.
 # --------------------------------------------------------------------------
 import os
+import random
+import string
 from unittest import mock
 import pytest
 
@@ -12,6 +14,9 @@ from azure.identity import DefaultAzureCredential
 
 from azstoragetorch.io import BlobIO
 from azstoragetorch._client import AzStorageTorchBlobClient
+
+
+EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
 
 
 @pytest.fixture
@@ -35,6 +40,10 @@ def blob_io(blob_url, mock_azstoragetorch_blob_client):
         mode="rb",
         azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
     )
+
+
+def random_ascii_letter_bytes(size):
+    return "".join(random.choices(string.ascii_letters, k=size)).encode("utf-8")
 
 
 class TestBlobIO:
@@ -185,6 +194,7 @@ class TestBlobIO:
             ("flush", []),
             ("read", []),
             ("readable", []),
+            ("readline", []),
             ("seek", [1]),
             ("seekable", []),
             ("tell", []),
@@ -287,26 +297,237 @@ class TestBlobIO:
         )
 
     @pytest.mark.parametrize("size", [0.5, "1"])
-    def test_read_raises_for_unsupported_size_types(self, blob_io, size):
+    @pytest.mark.parametrize("read_method", ["read", "readline"])
+    def test_read_methods_raise_for_unsupported_size_types(
+        self, blob_io, size, read_method
+    ):
         with pytest.raises(TypeError, match="must be an integer"):
-            blob_io.read(size)
+            getattr(blob_io, read_method)(size)
 
     def test_read_raises_for_less_than_negative_one_size(self, blob_io):
         with pytest.raises(ValueError, match="must be greater than or equal to -1"):
             blob_io.read(-2)
 
-    def test_readline_not_implemented(self, blob_io):
-        with pytest.raises(NotImplementedError, match="readline"):
-            blob_io.readline()
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            [b"line1\n", b"line2\n"],
+            # No newlines
+            [b"line1-no-new-line"],
+            # Content does not end with newline
+            [b"line1\n", b"line2-no-new-line"],
+            # Multiple newlines in succession
+            [b"line1\n", b"\n", b"\n", b"line2\n"],
+            # Lines with additional whitespace characters
+            [b"line1 \t\r\f\v\n", b"line2\n"],
+        ],
+    )
+    def test_readline(self, blob_io, mock_azstoragetorch_blob_client, lines):
+        content = b"".join(lines)
+        mock_azstoragetorch_blob_client.download.return_value = content
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+        current_expected_position = 0
+        for line in lines:
+            assert blob_io.readline() == line
+            current_expected_position += len(line)
+            assert blob_io.tell() == current_expected_position
+        assert blob_io.tell() == len(content)
+        mock_azstoragetorch_blob_client.download.assert_called_once_with(
+            offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
+        )
 
-    def test_readlines_not_implemented(self, blob_io):
-        with pytest.raises(NotImplementedError, match="readline"):
-            blob_io.readlines()
+    @pytest.mark.parametrize(
+        "size,content,expected_readline_return_val,expected_prefetch_size",
+        [
+            # Size less than first line
+            (2, b"line1\nline2\n", b"li", 2),
+            # Size more than first line
+            (5, b"line1\nline2\n", b"line1", 5),
+            # Size larger than content
+            (100, b"line1\nline2\n", b"line1\n", 100),
+            # Size larger than expected prefetch size
+            (
+                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE + 1,
+                b"line1\nline2\n",
+                b"line1\n",
+                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE + 1,
+            ),
+            # Size of None is synonymous with size not being set
+            (
+                None,
+                b"line1\nline2\n",
+                b"line1\n",
+                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+            # Size of -1 is synonymous with size not being set
+            (
+                -1,
+                b"line1\nline2\n",
+                b"line1\n",
+                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+            # Size less than -1 is synonymous with size not being set. Note that is different behavior than read()
+            # which throws validation errors for sizes < -1. This behavior was chosen to stay consistent with
+            # file-like objects from open().
+            (
+                -2,
+                b"line1\nline2\n",
+                b"line1\n",
+                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+        ],
+    )
+    def test_readline_with_size(
+        self,
+        blob_io,
+        mock_azstoragetorch_blob_client,
+        size,
+        content,
+        expected_readline_return_val,
+        expected_prefetch_size,
+    ):
+        mock_azstoragetorch_blob_client.download.return_value = content[
+            :expected_prefetch_size
+        ]
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+        assert blob_io.readline(size) == expected_readline_return_val
+        assert blob_io.tell() == len(expected_readline_return_val)
+        mock_azstoragetorch_blob_client.download.assert_called_once_with(
+            offset=0, length=expected_prefetch_size
+        )
 
-    def test_next_not_implemented(self, blob_io):
-        blob_iter = iter(blob_io)
-        with pytest.raises(NotImplementedError, match="readline"):
-            next(blob_iter)
+    def test_readline_multiple_prefetches(
+        self, blob_io, mock_azstoragetorch_blob_client
+    ):
+        first_download_prefetch = random_ascii_letter_bytes(
+            EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
+        )
+        second_download_prefetch = b"\n" + random_ascii_letter_bytes(
+            EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE - 1
+        )
+        final_download_prefetch = random_ascii_letter_bytes(100)
+        download_batches = [
+            first_download_prefetch,
+            second_download_prefetch,
+            final_download_prefetch,
+        ]
+        blob_size = sum([len(batch) for batch in download_batches])
+        mock_azstoragetorch_blob_client.download.side_effect = download_batches
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = blob_size
+
+        assert blob_io.readline() == first_download_prefetch + b"\n"
+        assert blob_io.tell() == len(first_download_prefetch) + 1
+        # First readline() should have resulted in two prefetches because the first newline is in the second prefetch
+        assert mock_azstoragetorch_blob_client.download.call_args_list == [
+            mock.call(offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+            mock.call(
+                offset=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+                length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+        ]
+        assert (
+            blob_io.readline() == second_download_prefetch[1:] + final_download_prefetch
+        )
+        assert blob_io.tell() == blob_size
+        # Second readline should result in triggering the final prefetch because there are no newlines for the rest
+        # of the blob content.
+        assert mock_azstoragetorch_blob_client.download.call_args_list == [
+            mock.call(offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+            mock.call(
+                offset=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+                length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+            mock.call(
+                offset=2 * EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+                length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
+            ),
+        ]
+
+    def test_readline_mixed_with_read(self, blob_io, mock_azstoragetorch_blob_client):
+        content = b"line1\nline2\nline3\n"
+        mock_azstoragetorch_blob_client.download.side_effect = [
+            content,
+            b"line2",
+            b"\nline3\n",
+        ]
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+
+        assert blob_io.readline() == b"line1\n"
+        assert blob_io.tell() == 6
+        assert blob_io.read(5) == b"line2"
+        assert blob_io.tell() == 11
+        assert blob_io.readline() == b"\n"
+        assert blob_io.tell() == 12
+        assert blob_io.readline() == b"line3\n"
+        assert blob_io.tell() == len(content)
+        assert mock_azstoragetorch_blob_client.download.call_args_list == [
+            # First readline() will result in full prefetch
+            mock.call(offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+            # Out of band read(), downloads only requested range and invalidates prefetch cache
+            mock.call(offset=6, length=5),
+            # Second readline() will result in full prefetch
+            mock.call(offset=11, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+        ]
+
+    def test_readline_mixed_with_seek(self, blob_io, mock_azstoragetorch_blob_client):
+        content = b"line1\nline2\nline3\n"
+        mock_azstoragetorch_blob_client.download.side_effect = [
+            content,
+            b"\nline3\n",
+        ]
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+
+        assert blob_io.readline() == b"line1\n"
+        assert blob_io.tell() == 6
+        assert blob_io.seek(11) == 11
+        assert blob_io.tell() == 11
+        assert blob_io.readline() == b"\n"
+        assert blob_io.tell() == 12
+        assert blob_io.readline() == b"line3\n"
+        assert blob_io.tell() == len(content)
+        assert mock_azstoragetorch_blob_client.download.call_args_list == [
+            # First readline() will result in full prefetch
+            mock.call(offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+            # Second readline() will result in full prefetch from prior out-of-band seek()
+            mock.call(offset=11, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE),
+        ]
+
+    def test_readline_beyond_end(self, blob_io, mock_azstoragetorch_blob_client):
+        content = b"line1\nline2\n"
+        mock_azstoragetorch_blob_client.download.return_value = content
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+        blob_io.seek(0, os.SEEK_END)
+        assert blob_io.readline() == b""
+        assert blob_io.tell() == len(content)
+        mock_azstoragetorch_blob_client.download.assert_not_called()
+
+    def test_readline_size_zero(self, blob_io, mock_azstoragetorch_blob_client):
+        assert blob_io.readline(0) == b""
+        assert blob_io.tell() == 0
+        mock_azstoragetorch_blob_client().download.assert_not_called()
+
+    def test_readlines(self, blob_io, mock_azstoragetorch_blob_client):
+        lines = [b"line1\n", b"line2\n", b"line3\n"]
+        content = b"".join(lines)
+        mock_azstoragetorch_blob_client.download.return_value = content
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+        assert blob_io.readlines() == lines
+        assert blob_io.tell() == len(content)
+        mock_azstoragetorch_blob_client.download.assert_called_once_with(
+            offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
+        )
+
+    def test_next(self, blob_io, mock_azstoragetorch_blob_client):
+        lines = [b"line1\n", b"line2\n", b"line3\n"]
+        content = b"".join(lines)
+        mock_azstoragetorch_blob_client.download.return_value = content
+        mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
+        iterated_lines = [line for line in blob_io]
+        assert iterated_lines == lines
+        assert blob_io.tell() == len(content)
+        mock_azstoragetorch_blob_client.download.assert_called_once_with(
+            offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
+        )
 
     def test_seekable(self, blob_url):
         blob_io = BlobIO(blob_url, mode="rb")
