@@ -24,6 +24,9 @@ _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
+    _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
+    _READLINE_TERMINATOR = b"\n"
+
     def __init__(
         self,
         blob_url: str,
@@ -45,6 +48,7 @@ class BlobIO(io.IOBase):
 
         self._position = 0
         self._closed = False
+        self._readline_buffer = b""
 
     def close(self) -> None:
         self._close_client()
@@ -65,6 +69,7 @@ class BlobIO(io.IOBase):
             self._validate_is_integer("size", size)
             self._validate_min("size", size, -1)
         self._validate_not_closed()
+        self._invalidate_readline_buffer()
         return self._read(size)
 
     def readable(self) -> bool:
@@ -74,21 +79,16 @@ class BlobIO(io.IOBase):
         return False
 
     def readline(self, size: Optional[int] = -1, /) -> bytes:
-        # BaseIO includes a default implementation of readline() that calls
-        # read() with a size of 1 until it finds a newline character. As of now, this has very poor
-        # performance implications as one read() will result in at least one HTTP GET request for each
-        # read() call.
-        #
-        # Instead of allowing the default implementation and having users impacted by these
-        # implications, we raise a NotImplementedError so that readline() and any other methods
-        # that are automatically implemented from readline() (e.g. readlines() and __next__()) can't
-        # be used until we implement a more appropriate strategy.
-        raise NotImplementedError("readline")
+        if size is not None:
+            self._validate_is_integer("size", size)
+        self._validate_not_closed()
+        return self._readline(size)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET, /) -> int:
         self._validate_is_integer("offset", offset)
         self._validate_is_integer("whence", whence)
         self._validate_not_closed()
+        self._invalidate_readline_buffer()
         return self._seek(offset, whence)
 
     def seekable(self) -> bool:
@@ -122,6 +122,11 @@ class BlobIO(io.IOBase):
         if self.closed:
             raise ValueError("I/O operation on closed file")
 
+    def _invalidate_readline_buffer(self) -> None:
+        # NOTE: We invalidate the readline buffer for any out-of-band read() or seek() in order to simplify
+        # caching logic for readline(). In the future, we can consider reusing the buffer for read() calls.
+        self._readline_buffer = b""
+
     def _get_azstoragetorch_blob_client(
         self,
         blob_url: str,
@@ -153,8 +158,58 @@ class BlobIO(io.IOBase):
         # key to determine if the URL has a SAS token.
         return "sig" in parsed_qs
 
+    def _readline(self, size: Optional[int]) -> bytes:
+        consumed = b""
+        if size == 0 or self._is_at_end_of_blob():
+            return consumed
+
+        limit = self._get_limit(size)
+        if self._readline_buffer:
+            consumed = self._consume_from_readline_buffer(consumed, limit)
+        while self._should_download_more_for_readline(consumed, limit):
+            self._readline_buffer = self._client.download(
+                offset=self._position, length=self._READLINE_PREFETCH_SIZE
+            )
+            consumed = self._consume_from_readline_buffer(consumed, limit)
+        return consumed
+
+    def _get_limit(self, size: Optional[int]) -> Optional[int]:
+        limit = size
+        if size is not None and size < 0:
+            limit = None
+        return limit
+
+    def _consume_from_readline_buffer(
+        self, consumed: bytes, limit: Optional[int]
+    ) -> bytes:
+        if limit is not None:
+            limit -= len(consumed)
+        find_pos = self._readline_buffer.find(self._READLINE_TERMINATOR, 0, limit)
+        end = find_pos + 1
+        if find_pos == -1:
+            buffer_length = len(self._readline_buffer)
+            if limit is None:
+                end = buffer_length
+            else:
+                end = min(buffer_length, limit)
+        consumed += self._readline_buffer[:end]
+        self._readline_buffer = self._readline_buffer[end:]
+        self._position += end
+        return consumed
+
+    def _should_download_more_for_readline(
+        self, consumed: bytes, limit: Optional[int]
+    ) -> bool:
+        if consumed.endswith(self._READLINE_TERMINATOR):
+            return False
+        if self._is_at_end_of_blob():
+            return False
+        if limit is not None and len(consumed) == limit:
+            return False
+        return True
+
     def _read(self, size: Optional[int]) -> bytes:
-        if size == 0 or self._position >= self._client.get_blob_size():
+        if size == 0 or self._is_at_end_of_blob():
             return b""
         download_length = size
         if size is not None and size < 0:
@@ -182,3 +237,6 @@ class BlobIO(io.IOBase):
     def _close_client(self) -> None:
         if not self._closed:
             self._client.close()
+
+    def _is_at_end_of_blob(self) -> bool:
+        return self._position >= self._client.get_blob_size()
