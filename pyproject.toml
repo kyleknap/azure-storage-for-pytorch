@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "azure-identity<2",
+    "azure-storage-blob<13"
 ]
 dynamic = ["version"]
 
