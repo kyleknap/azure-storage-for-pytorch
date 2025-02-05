@@ -58,6 +58,10 @@ class FileIOSpy(io.IOBase):
         self.recorded_operations.append(ReadOp([size]))
         return self.underlying_file.read(size)
 
+    def readline(self, size = -1):
+        print(f'readline {size}')
+        return self.underlying_file.readline(size)
+
     def seekable(self):
         return self.underlying_file.seekable()
 
@@ -370,7 +374,8 @@ def main():
     pass
     # enable_logging()
     # load_from_file("large_model.pth")
-    #spy = load_with_spy("large_model.pth")
+    spy = load_with_spy("large_model.pth")
+    print(len(spy.recorded_operations))
     # record_playback(spy, "large_model.pth")
     # display_read_stats(spy)
     #plot_spy(spy)
@@ -389,7 +394,7 @@ def main():
     # benchmark_load_from_blobio("large_model.pth")
     # benchmark_load_from_adlfs("large_model.pth")
     # benchmark_load_from_blobfile("large_model.pth")
-    benchmark_playback_from_blobio("large_model.pth")
+    # benchmark_playback_from_blobio("large_model.pth")
 
 
 if __name__ == "__main__":
