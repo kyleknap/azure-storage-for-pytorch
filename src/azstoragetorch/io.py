@@ -6,7 +6,7 @@
 
 import io
 import os
-from typing import get_args, Optional, Union, Literal, Type, Tuple
+from typing import get_args, Optional, Union, Literal, Type
 import urllib.parse
 
 from azure.identity import DefaultAzureCredential
@@ -24,7 +24,7 @@ _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
-    _DEFAULT_READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
+    _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
     _READLINE_TERMINATOR = b"\n"
 
     def __init__(
@@ -161,37 +161,30 @@ class BlobIO(io.IOBase):
     def _readline(self, size: Optional[int]) -> bytes:
         if size == 0 or self._is_at_end_of_blob():
             return b""
-        limit, prefetch_size = self._get_limit_and_prefetch_size(size)
+        limit = self._get_limit(size)
 
         consumed = b""
         if self._readline_buffer:
             consumed = self._consume_from_readline_buffer(consumed, limit)
         while self._should_download_more_for_readline(consumed, limit):
             self._readline_buffer = self._client.download(
-                offset=self._position, length=prefetch_size
+                offset=self._position, length=self._READLINE_PREFETCH_SIZE
             )
             consumed = self._consume_from_readline_buffer(consumed, limit)
         return consumed
 
-    def _get_limit_and_prefetch_size(
-        self, size: Optional[int]
-    ) -> Tuple[Optional[int], int]:
+    def _get_limit(self, size: Optional[int]) -> Optional[int]:
         limit = size
-        prefetch_size = self._DEFAULT_READLINE_PREFETCH_SIZE
         if size is not None and size < 0:
             limit = None
-        if limit is not None:
-            prefetch_size = limit
-        return limit, prefetch_size
+        return limit
 
     def _consume_from_readline_buffer(
         self, consumed: bytes, limit: Optional[int]
     ) -> bytes:
         if limit is not None:
             limit -= len(consumed)
-        find_pos = self._readline_buffer.find(
-            self._READLINE_TERMINATOR, 0, limit
-        )
+        find_pos = self._readline_buffer.find(self._READLINE_TERMINATOR, 0, limit)
         end = find_pos + 1
         if find_pos == -1:
             buffer_length = len(self._readline_buffer)

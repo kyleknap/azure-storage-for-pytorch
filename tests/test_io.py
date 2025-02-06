@@ -337,34 +337,31 @@ class TestBlobIO:
         )
 
     @pytest.mark.parametrize(
-        "size,content,expected_readline_return_val,expected_prefetch_size",
+        "size,content,expected_readline_return_val",
         [
             # Size less than first line
-            (2, b"line1\nline2\n", b"li", 2),
+            (2, b"line1\nline2\n", b"li"),
             # Size more than first line
-            (5, b"line1\nline2\n", b"line1", 5),
+            (5, b"line1\nline2\n", b"line1"),
             # Size larger than content
-            (100, b"line1\nline2\n", b"line1\n", 100),
+            (100, b"line1\nline2\n", b"line1\n"),
             # Size larger than expected prefetch size
             (
                 EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE + 1,
                 b"line1\nline2\n",
                 b"line1\n",
-                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE + 1,
             ),
             # Size of None is synonymous with size not being set
             (
                 None,
                 b"line1\nline2\n",
                 b"line1\n",
-                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
             ),
             # Size of -1 is synonymous with size not being set
             (
                 -1,
                 b"line1\nline2\n",
                 b"line1\n",
-                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
             ),
             # Size less than -1 is synonymous with size not being set. Note that is different behavior than read()
             # which throws validation errors for sizes < -1. This behavior was chosen to stay consistent with
@@ -373,7 +370,6 @@ class TestBlobIO:
                 -2,
                 b"line1\nline2\n",
                 b"line1\n",
-                EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE,
             ),
         ],
     )
@@ -384,16 +380,15 @@ class TestBlobIO:
         size,
         content,
         expected_readline_return_val,
-        expected_prefetch_size,
     ):
         mock_azstoragetorch_blob_client.download.return_value = content[
-            :expected_prefetch_size
+            :EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
         ]
         mock_azstoragetorch_blob_client.get_blob_size.return_value = len(content)
         assert blob_io.readline(size) == expected_readline_return_val
         assert blob_io.tell() == len(expected_readline_return_val)
         mock_azstoragetorch_blob_client.download.assert_called_once_with(
-            offset=0, length=expected_prefetch_size
+            offset=0, length=EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE
         )
 
     def test_readline_multiple_prefetches(
