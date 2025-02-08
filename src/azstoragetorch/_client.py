@@ -11,6 +11,7 @@ import logging
 import math
 import random
 import time
+import uuid
 from typing import Optional, List, Tuple, Iterator, Union
 
 from azure.core.credentials import (
@@ -38,6 +39,7 @@ class AzStorageTorchBlobClient:
     _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
     _PARTITION_SIZE = 16 * 1024 * 1024
     _NUM_DOWNLOAD_ATTEMPTS = 3
+    _STAGE_BLOCK_SIZE = 4 * 1024 * 1024
     _RETRYABLE_READ_EXCEPTIONS = (
         azure.core.exceptions.IncompleteReadError,
         azure.core.exceptions.HttpResponseError,
@@ -76,6 +78,20 @@ class AzStorageTorchBlobClient:
         else:
             return self._partitioned_download(offset, length)
 
+    def stage_blocks(self, data: bytes) -> List[str]:
+        if not data:
+            raise ValueError("Data must not be empty.")
+        stage_block_partitions = self._get_stage_block_partitions(data)
+        if len(stage_block_partitions) == 1:
+            return [self._stage_block(data)]
+        else:
+            return self._stage_blocks_in_parallel(data, stage_block_partitions)
+
+    def commit_block_list(self, block_ids: List[str]) -> None:
+        if not block_ids:
+            raise ValueError("Block IDs must not be empty.")
+        self._sdk_blob_client.commit_block_list(block_ids)
+
     def close(self) -> None:
         self._executor.shutdown()
 
@@ -93,21 +109,21 @@ class AzStorageTorchBlobClient:
 
     def _partitioned_download(self, offset: int, length: int) -> bytes:
         futures = []
-        for partition in self._get_partitioned_reads(offset, length):
+        for read_partition in self._get_partitions(offset, length, self._PARTITION_SIZE):
             futures.append(
-                self._executor.submit(self._download_with_retries, *partition)
+                self._executor.submit(self._download_with_retries, *read_partition)
             )
         return b"".join(f.result() for f in futures)
 
-    def _get_partitioned_reads(self, offset: int, length: int) -> List[Tuple[int, int]]:
+    def _get_partitions(self, offset: int, length: int, partition_size: int) -> List[Tuple[int, int]]:
         end = offset + length
-        num_partitions = math.ceil(length / self._PARTITION_SIZE)
+        num_partitions = math.ceil(length / partition_size)
         partitions = []
         for i in range(num_partitions):
-            start = offset + i * self._PARTITION_SIZE
+            start = offset + i * partition_size
             if start >= end:
                 break
-            size = min(self._PARTITION_SIZE, end - start)
+            size = min(partition_size, end - start)
             partitions.append((start, size))
         return partitions
 
@@ -162,3 +178,19 @@ class AzStorageTorchBlobClient:
         for chunk in stream:
             content.write(chunk)
         return content.getvalue()
+
+    def _get_stage_block_partitions(self, data: bytes) -> List[Tuple[int, int]]:
+        return self._get_partitions(0, len(data), self._STAGE_BLOCK_SIZE)
+
+    def _stage_blocks_in_parallel(self, data: bytes, stage_block_partitions: List[Tuple[int, int]]) -> List[str]:
+        return list(
+            self._executor.map(
+                self._stage_block,
+                (data[pos : pos + length] for pos, length in stage_block_partitions),
+            )
+        )
+
+    def _stage_block(self, data: bytes) -> None:
+        block_id = uuid.uuid4().hex
+        self._sdk_blob_client.stage_block(block_id, data)
+        return block_id

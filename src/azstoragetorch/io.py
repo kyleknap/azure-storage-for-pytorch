@@ -19,13 +19,14 @@ from azstoragetorch._client import SDK_CREDENTIAL_TYPE as _SDK_CREDENTIAL_TYPE
 from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBlobClient
 
 
-_SUPPORTED_MODES = Literal["rb"]
+_SUPPORTED_MODES = Literal["rb", "wb"]
 _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
     _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
     _READLINE_TERMINATOR = b"\n"
+    _WRITE_BUFFER_SIZE = 4 * 1024 * 1024
 
     def __init__(
         self,
@@ -51,8 +52,12 @@ class BlobIO(io.IOBase):
         # TODO: Consider using a bytearray and/or memoryview for readline buffer. There may be performance
         #  gains in regards to reducing the number of copies performed when consuming from buffer.
         self._readline_buffer = b""
+        self._write_buffer = b""
+        self._stage_block_ids = []
 
     def close(self) -> None:
+        if not self.closed and self.writable():
+            self._commit_blob()
         self._close_client()
         self._closed = True
 
@@ -65,12 +70,14 @@ class BlobIO(io.IOBase):
 
     def flush(self) -> None:
         self._validate_not_closed()
+        self._flush()
 
     def read(self, size: Optional[int] = -1, /) -> bytes:
         if size is not None:
             self._validate_is_integer("size", size)
             self._validate_min("size", size, -1)
         self._validate_not_closed()
+        # TODO: Validate if readable?
         self._invalidate_readline_buffer()
         return self._read(size)
 
@@ -84,12 +91,14 @@ class BlobIO(io.IOBase):
         if size is not None:
             self._validate_is_integer("size", size)
         self._validate_not_closed()
+        # TODO: Validate if seekable?
         return self._readline(size)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET, /) -> int:
         self._validate_is_integer("offset", offset)
         self._validate_is_integer("whence", whence)
         self._validate_not_closed()
+        # TODO: Validate if seekable?
         self._invalidate_readline_buffer()
         return self._seek(offset, whence)
 
@@ -101,9 +110,16 @@ class BlobIO(io.IOBase):
         return self._position
 
     def write(self, b: Union[bytes, bytearray], /) -> int:
-        raise NotImplementedError("write")
+        # TODO: Add type validation
+        self._validate_not_closed()
+        # TODO: Validate if writable?
+        # TODO: Handle byte array?
+        return self._write(b)
 
     def writable(self) -> bool:
+        if self._mode == "wb":
+            self._validate_not_closed()
+            return True
         return False
 
     def _validate_mode(self, mode: str) -> None:
@@ -228,6 +244,21 @@ class BlobIO(io.IOBase):
         if whence == os.SEEK_END:
             return self._client.get_blob_size() + offset
         raise ValueError(f"Unsupported whence: {whence}")
+
+    def _flush(self) -> None:
+        if self._write_buffer:
+            self._stage_block_ids.extend(self._client.stage_blocks(self._write_buffer))
+            self._write_buffer = b""
+
+    def _write(self, b: Union[bytes, bytearray]) -> int:
+        self._write_buffer += b
+        if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
+            self._flush()
+        return len(b)
+
+    def _commit_blob(self) -> None:
+        self._flush()
+        self._client.commit_block_list(self._stage_block_ids)
 
     def _close_client(self) -> None:
         if not self._closed:
