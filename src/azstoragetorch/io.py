@@ -20,6 +20,7 @@ from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBl
 
 
 _SUPPORTED_MODES = Literal["rb", "wb"]
+_SUPPORTED_WRITE_TYPES = Union[bytes, bytearray]
 _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
@@ -76,13 +77,13 @@ class BlobIO(io.IOBase):
         if size is not None:
             self._validate_is_integer("size", size)
             self._validate_min("size", size, -1)
+        self._validate_readable()
         self._validate_not_closed()
-        # TODO: Validate if readable?
         self._invalidate_readline_buffer()
         return self._read(size)
 
     def readable(self) -> bool:
-        if self._mode == "rb":
+        if self._is_read_mode():
             self._validate_not_closed()
             return True
         return False
@@ -90,15 +91,15 @@ class BlobIO(io.IOBase):
     def readline(self, size: Optional[int] = -1, /) -> bytes:
         if size is not None:
             self._validate_is_integer("size", size)
+        self._validate_readable()
         self._validate_not_closed()
-        # TODO: Validate if seekable?
         return self._readline(size)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET, /) -> int:
         self._validate_is_integer("offset", offset)
         self._validate_is_integer("whence", whence)
+        self._validate_seekable()
         self._validate_not_closed()
-        # TODO: Validate if seekable?
         self._invalidate_readline_buffer()
         return self._seek(offset, whence)
 
@@ -109,15 +110,14 @@ class BlobIO(io.IOBase):
         self._validate_not_closed()
         return self._position
 
-    def write(self, b: Union[bytes, bytearray], /) -> int:
-        # TODO: Add type validation
+    def write(self, b: _SUPPORTED_WRITE_TYPES, /) -> int:
+        self._validate_supported_write_type(b)
+        self._validate_writable()
         self._validate_not_closed()
-        # TODO: Validate if writable?
-        # TODO: Handle byte array?
         return self._write(b)
 
     def writable(self) -> bool:
-        if self._mode == "wb":
+        if self._is_write_mode():
             self._validate_not_closed()
             return True
         return False
@@ -135,6 +135,30 @@ class BlobIO(io.IOBase):
             raise ValueError(
                 f"{param_name} must be greater than or equal to {min_value}"
             )
+
+    def _validate_supported_write_type(self, b: _SUPPORTED_WRITE_TYPES) -> None:
+        if not isinstance(b, get_args(_SUPPORTED_WRITE_TYPES)):
+            raise TypeError(
+                f"Unsupported type for write: {type(b)}. Supported types: {get_args(_SUPPORTED_WRITE_TYPES)}"
+            )
+
+    def _validate_readable(self) -> None:
+        if not self._is_read_mode():
+            raise io.UnsupportedOperation("read")
+
+    def _validate_seekable(self) -> None:
+        if not self._is_read_mode():
+            raise io.UnsupportedOperation("seek")
+
+    def _validate_writable(self) -> None:
+        if not self._is_write_mode():
+            raise io.UnsupportedOperation("write")
+
+    def _is_read_mode(self) -> bool:
+        return self._mode == "rb"
+
+    def _is_write_mode(self) -> bool:
+        return self._mode == "wb"
 
     def _validate_not_closed(self) -> None:
         if self.closed:
@@ -254,6 +278,7 @@ class BlobIO(io.IOBase):
         self._write_buffer += b
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
             self._flush()
+        self._position += len(b)
         return len(b)
 
     def _commit_blob(self) -> None:

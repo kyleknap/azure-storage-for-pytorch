@@ -21,6 +21,7 @@ from azstoragetorch._client import AzStorageTorchBlobClient
 MB = 1024 * 1024
 DEFAULT_PARTITION_DOWNLOAD_THRESHOLD = 16 * MB
 DEFAULT_PARTITION_SIZE = 16 * MB
+DEFAULT_BLOCK_SIZE = 4 * MB
 EXPECTED_RETRYABLE_READ_EXCEPTIONS = [
     azure.core.exceptions.IncompleteReadError,
     azure.core.exceptions.HttpResponseError,
@@ -79,6 +80,12 @@ def http_response_error(blob_url):
     mock_http_response.content_type = "application/xml"
     mock_http_response.text.return_value = ""
     return azure.core.exceptions.HttpResponseError(response=mock_http_response)
+
+
+@pytest.fixture
+def mock_uuid4():
+    with mock.patch("uuid.uuid4") as mock_uuid:
+        yield mock_uuid
 
 
 def random_bytes(length):
@@ -402,3 +409,60 @@ class TestAzStorageTorchBlobClient:
             ["0-9"],
             blob_properties.etag,
         )
+
+
+    @pytest.mark.parametrize(
+        "bytes_like_type",
+        [
+            bytes,
+            bytearray,
+        ],
+    )
+    @pytest.mark.parametrize(
+        "content_length,expected_stage_block_partitions",
+        [
+            (1, [(0, 1)]),
+            (DEFAULT_BLOCK_SIZE-1, [(0, DEFAULT_BLOCK_SIZE-1)]),
+            (DEFAULT_BLOCK_SIZE, [(0, DEFAULT_BLOCK_SIZE)]),
+            (DEFAULT_BLOCK_SIZE+1, [(0, DEFAULT_BLOCK_SIZE), (DEFAULT_BLOCK_SIZE, DEFAULT_BLOCK_SIZE+1)]),
+            (DEFAULT_BLOCK_SIZE*2, [(0, DEFAULT_BLOCK_SIZE), (DEFAULT_BLOCK_SIZE, DEFAULT_BLOCK_SIZE*2)]),
+            (DEFAULT_BLOCK_SIZE*2+1, [(0, DEFAULT_BLOCK_SIZE), (DEFAULT_BLOCK_SIZE, DEFAULT_BLOCK_SIZE*2), (DEFAULT_BLOCK_SIZE*2, DEFAULT_BLOCK_SIZE*2+1)]),
+            (DEFAULT_BLOCK_SIZE*4, [(0, DEFAULT_BLOCK_SIZE), (DEFAULT_BLOCK_SIZE, DEFAULT_BLOCK_SIZE*2), (DEFAULT_BLOCK_SIZE*2, DEFAULT_BLOCK_SIZE*3), (DEFAULT_BLOCK_SIZE*3, DEFAULT_BLOCK_SIZE*4)]),
+        ]
+    )
+    def test_stage_blocks(self, bytes_like_type, content_length, expected_stage_block_partitions, azstoragetorch_blob_client, mock_sdk_blob_client, mock_uuid4):
+        expected_block_ids = [str(i) for i in range(len(expected_stage_block_partitions))]
+        mock_uuid4.side_effect = expected_block_ids
+        content = bytes_like_type(random_bytes(content_length))
+        expected_stage_block_calls = [
+            mock.call(str(i), content[start:end])
+            for i, (start, end) in enumerate(expected_stage_block_partitions)
+        ]
+        assert azstoragetorch_blob_client.stage_blocks(content) == expected_block_ids
+        assert mock_sdk_blob_client.stage_block.call_args_list == expected_stage_block_calls
+        assert mock_uuid4.call_count == len(expected_stage_block_partitions)
+
+
+    @pytest.mark.parametrize(
+        "empty_content",
+        [
+            b"",
+            bytearray(),
+        ]
+    )
+    def test_stage_blocks_raises_on_empty_data(self, empty_content, azstoragetorch_blob_client):
+        with pytest.raises(ValueError, match="must not be empty"):
+            azstoragetorch_blob_client.stage_blocks(empty_content)
+
+
+    @pytest.mark.parametrize(
+        "block_list",
+        [
+            [],
+            ["block-1"],
+            ["block-1", "block-2"],
+        ]
+    )
+    def test_commit_block_list(self, block_list, azstoragetorch_blob_client, mock_sdk_blob_client):
+        azstoragetorch_blob_client.commit_block_list(block_list)
+        mock_sdk_blob_client.commit_block_list.assert_called_once_with(block_list)

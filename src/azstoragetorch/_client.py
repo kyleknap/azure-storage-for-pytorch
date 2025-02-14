@@ -32,6 +32,7 @@ SDK_CREDENTIAL_TYPE = Optional[
         TokenCredential,
     ]
 ]
+_SUPPORTED_BYTES_LIKE = Union[bytes, bytearray]
 
 
 class AzStorageTorchBlobClient:
@@ -78,7 +79,7 @@ class AzStorageTorchBlobClient:
         else:
             return self._partitioned_download(offset, length)
 
-    def stage_blocks(self, data: bytes) -> List[str]:
+    def stage_blocks(self, data: _SUPPORTED_BYTES_LIKE) -> List[str]:
         if not data:
             raise ValueError("Data must not be empty.")
         stage_block_partitions = self._get_stage_block_partitions(data)
@@ -88,8 +89,6 @@ class AzStorageTorchBlobClient:
             return self._stage_blocks_in_parallel(data, stage_block_partitions)
 
     def commit_block_list(self, block_ids: List[str]) -> None:
-        if not block_ids:
-            raise ValueError("Block IDs must not be empty.")
         self._sdk_blob_client.commit_block_list(block_ids)
 
     def close(self) -> None:
@@ -182,7 +181,7 @@ class AzStorageTorchBlobClient:
     def _get_stage_block_partitions(self, data: bytes) -> List[Tuple[int, int]]:
         return self._get_partitions(0, len(data), self._STAGE_BLOCK_SIZE)
 
-    def _stage_blocks_in_parallel(self, data: bytes, stage_block_partitions: List[Tuple[int, int]]) -> List[str]:
+    def _stage_blocks_in_parallel(self, data: _SUPPORTED_BYTES_LIKE, stage_block_partitions: List[Tuple[int, int]]) -> List[str]:
         return list(
             self._executor.map(
                 self._stage_block,
@@ -191,6 +190,6 @@ class AzStorageTorchBlobClient:
         )
 
     def _stage_block(self, data: bytes) -> None:
-        block_id = uuid.uuid4().hex
+        block_id = str(uuid.uuid4())
         self._sdk_blob_client.stage_block(block_id, data)
         return block_id
