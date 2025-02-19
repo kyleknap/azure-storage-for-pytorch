@@ -28,6 +28,12 @@ EXPECTED_RETRYABLE_READ_EXCEPTIONS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def sleep_patch():
+    with mock.patch("time.sleep") as patched_sleep:
+        yield patched_sleep
+
+
 @pytest.fixture
 def blob_etag():
     return "blob-etag"
@@ -332,6 +338,7 @@ class TestAzStorageTorchBlobClient:
         mock_sdk_blob_client,
         mock_generated_sdk_storage_client,
         blob_properties,
+        sleep_patch,
     ):
         content = random_bytes(10)
         blob_properties.size = len(content)
@@ -344,6 +351,7 @@ class TestAzStorageTorchBlobClient:
         self.assert_expected_download_calls(
             mock_generated_sdk_storage_client, ["0-9", "0-9"], blob_properties.etag
         )
+        assert sleep_patch.call_count == 1
 
     @pytest.mark.parametrize(
         "retryable_exception_cls", EXPECTED_RETRYABLE_READ_EXCEPTIONS
@@ -355,6 +363,7 @@ class TestAzStorageTorchBlobClient:
         mock_sdk_blob_client,
         mock_generated_sdk_storage_client,
         blob_properties,
+        sleep_patch,
     ):
         content = random_bytes(10)
         blob_properties.size = len(content)
@@ -371,6 +380,7 @@ class TestAzStorageTorchBlobClient:
             ["0-9", "0-9", "0-9"],
             blob_properties.etag,
         )
+        assert sleep_patch.call_count == 2
 
     def test_does_not_retry_on_non_retryable_exceptions(
         self,

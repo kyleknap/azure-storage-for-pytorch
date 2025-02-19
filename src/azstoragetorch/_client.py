@@ -9,6 +9,8 @@ import functools
 import io
 import logging
 import math
+import random
+import time
 from typing import Optional, List, Tuple, Iterator, Union
 
 from azure.core.credentials import (
@@ -35,6 +37,7 @@ class AzStorageTorchBlobClient:
     _CONNECTION_DATA_BLOCK_SIZE = 256 * 1024
     _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
     _PARTITION_SIZE = 16 * 1024 * 1024
+    _NUM_DOWNLOAD_ATTEMPTS = 3
     _RETRYABLE_READ_EXCEPTIONS = (
         azure.core.exceptions.IncompleteReadError,
         azure.core.exceptions.HttpResponseError,
@@ -109,20 +112,23 @@ class AzStorageTorchBlobClient:
         return partitions
 
     def _download_with_retries(self, pos: int, length: int) -> bytes:
-        attempts_remaining = 3
-        while attempts_remaining > 0:
+        attempt = 0
+        while self._attempts_remaining(attempt):
             stream = self._get_download_stream(pos, length)
             try:
                 return self._read_stream(stream)
             except self._RETRYABLE_READ_EXCEPTIONS:
-                attempts_remaining -= 1
-                if not attempts_remaining:
+                backoff_time = self._get_backoff_time(attempt)
+                attempt += 1
+                if not self._attempts_remaining(attempt):
                     raise
                 _LOGGER.debug(
-                    "Retrying download from caught streaming exception (attempts remaining: %s).",
-                    attempts_remaining,
+                    "Sleeping %s seconds and retrying download from caught streaming exception (attempts remaining: %s).",
+                    backoff_time,
+                    self._attempts_remaining(attempt),
                     exc_info=True,
                 )
+                time.sleep(backoff_time)
 
     def _get_download_stream(self, pos: int, length: int) -> Iterator[bytes]:
         try:
@@ -138,6 +144,18 @@ class AzStorageTorchBlobClient:
             # in this function or a derivative of it if we plan to continue to raise Azure Python SDK
             # exceptions from this library (i.e. instead of raising our own exception classes).
             process_storage_error(e)
+
+    def _attempts_remaining(self, attempt_number: int) -> int:
+        return max(self._NUM_DOWNLOAD_ATTEMPTS - attempt_number, 0)
+
+    def _get_backoff_time(self, attempt_number: int) -> float:
+        # Backoff time uses exponential backoff with full jitter as a starting point to have at least
+        # some delay before retrying. For exceptions that we get while streaming data, it will likely be
+        # because of environment's network (e.g. high network load) so the approach will give some amount
+        # of backoff and randomness before attempting to stream again. In the future, we should
+        # consider other approaches such as adapting/throttling stream reading speeds to reduce occurrences
+        # of connection errors due to an overwhelmed network.
+        return min(random.uniform(0, 2**attempt_number), 20)
 
     def _read_stream(self, stream: Iterator[bytes]) -> bytes:
         content = io.BytesIO()
