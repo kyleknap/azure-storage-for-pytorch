@@ -20,7 +20,7 @@ from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBl
 
 
 _SUPPORTED_MODES = Literal["rb", "wb"]
-_SUPPORTED_WRITE_TYPES = Union[bytes, bytearray]
+_SUPPORTED_WRITE_TYPES = Union[bytes, bytearray, memoryview]
 _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
@@ -275,6 +275,8 @@ class BlobIO(io.IOBase):
             self._write_buffer = b""
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
+        if isinstance(b, memoryview):
+            b = b.tobytes()
         self._write_buffer += b
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
             self._flush()
