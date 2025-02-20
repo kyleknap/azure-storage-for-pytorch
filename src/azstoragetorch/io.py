@@ -6,7 +6,7 @@
 
 import io
 import os
-from typing import get_args, Optional, Union, Literal
+from typing import get_args, Optional, Union, Literal, Type
 import urllib.parse
 
 from azure.identity import DefaultAzureCredential
@@ -15,14 +15,11 @@ from azure.core.credentials import (
     TokenCredential,
 )
 
+from azstoragetorch._client import SDK_CREDENTIAL_TYPE as _SDK_CREDENTIAL_TYPE
+from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBlobClient
+
 
 _SUPPORTED_MODES = Literal["rb"]
-_SDK_CREDENTIAL_TYPE = Optional[
-    Union[
-        AzureSasCredential,
-        TokenCredential,
-    ]
-]
 _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
@@ -33,18 +30,24 @@ class BlobIO(io.IOBase):
         mode: _SUPPORTED_MODES,
         *,
         credential: _AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        **_internal_only_kwargs,
     ):
         self._blob_url = blob_url
         self._validate_mode(mode)
         self._mode = mode
-        self._sdk_credential = self._get_sdk_credential(blob_url, credential)
+        self._client = self._get_azstoragetorch_blob_client(
+            blob_url,
+            credential,
+            _internal_only_kwargs.get(
+                "azstoragetorch_blob_client_cls", _AzStorageTorchBlobClient
+            ),
+        )
 
-        self._blob_downloader = self._get_blob_downloader()
         self._position = 0
         self._closed = False
 
     def close(self) -> None:
-        self._close_blob_downloader()
+        self._close_client()
         self._closed = True
 
     @property
@@ -119,6 +122,17 @@ class BlobIO(io.IOBase):
         if self.closed:
             raise ValueError("I/O operation on closed file")
 
+    def _get_azstoragetorch_blob_client(
+        self,
+        blob_url: str,
+        credential: _AZSTORAGETORCH_CREDENTIAL_TYPE,
+        azstoragetorch_blob_client_cls: Type[_AzStorageTorchBlobClient],
+    ) -> _AzStorageTorchBlobClient:
+        return azstoragetorch_blob_client_cls.from_blob_url(
+            blob_url,
+            self._get_sdk_credential(blob_url, credential),
+        )
+
     def _get_sdk_credential(
         self, blob_url: str, credential: _AZSTORAGETORCH_CREDENTIAL_TYPE
     ) -> _SDK_CREDENTIAL_TYPE:
@@ -139,18 +153,13 @@ class BlobIO(io.IOBase):
         # key to determine if the URL has a SAS token.
         return "sig" in parsed_qs
 
-    def _get_blob_downloader(self) -> "_BlobDownloader":
-        return _BlobDownloader(self._blob_url, self._sdk_credential)
-
     def _read(self, size: Optional[int]) -> bytes:
-        if size == 0 or self._position >= self._blob_downloader.get_blob_size():
+        if size == 0 or self._position >= self._client.get_blob_size():
             return b""
         download_length = size
         if size is not None and size < 0:
             download_length = None
-        content = self._blob_downloader.download(
-            offset=self._position, length=download_length
-        )
+        content = self._client.download(offset=self._position, length=download_length)
         self._position += len(content)
         return content
 
@@ -167,24 +176,9 @@ class BlobIO(io.IOBase):
         if whence == os.SEEK_CUR:
             return self._position + offset
         if whence == os.SEEK_END:
-            return self._blob_downloader.get_blob_size() + offset
+            return self._client.get_blob_size() + offset
         raise ValueError(f"Unsupported whence: {whence}")
 
-    def _close_blob_downloader(self) -> None:
+    def _close_client(self) -> None:
         if not self._closed:
-            self._blob_downloader.close()
-
-
-class _BlobDownloader:
-    def __init__(self, blob_url: str, sdk_credential: _SDK_CREDENTIAL_TYPE):
-        self._blob_url = blob_url
-        self._sdk_credential = sdk_credential
-
-    def get_blob_size(self) -> int:
-        raise NotImplementedError("get_blob_size")
-
-    def download(self, offset: int = 0, length: Optional[int] = None) -> bytes:
-        raise NotImplementedError("download")
-
-    def close(self) -> None:
-        raise NotImplementedError("close")
+            self._client.close()
