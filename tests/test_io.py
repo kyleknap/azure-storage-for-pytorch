@@ -742,6 +742,7 @@ class TestBlobIO:
         [
             bytes,
             bytearray,
+            memoryview,
         ]
     )
     def test_write(self, bytes_like_type, writable_blob_io, mock_azstoragetorch_blob_client):
@@ -867,7 +868,6 @@ class TestBlobIO:
         [
             None,
             "string",
-            memoryview(b"content"),  # Note: we will probably want to support memoryviews in the future
             1,
         ],
     )

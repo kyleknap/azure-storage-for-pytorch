@@ -53,7 +53,7 @@ class BlobIO(io.IOBase):
         # TODO: Consider using a bytearray and/or memoryview for readline buffer. There may be performance
         #  gains in regards to reducing the number of copies performed when consuming from buffer.
         self._readline_buffer = b""
-        self._write_buffer = b""
+        self._write_buffer = bytearray()
         self._stage_block_ids = []
 
     def close(self) -> None:
@@ -271,17 +271,16 @@ class BlobIO(io.IOBase):
 
     def _flush(self) -> None:
         if self._write_buffer:
-            self._stage_block_ids.extend(self._client.stage_blocks(self._write_buffer))
-            self._write_buffer = b""
+            self._stage_block_ids.extend(self._client.stage_blocks(memoryview(self._write_buffer)))
+            self._write_buffer = bytearray()
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
-        if isinstance(b, memoryview):
-            b = b.tobytes()
-        self._write_buffer += b
+        write_length = len(b)
+        self._write_buffer.extend(b)
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
             self._flush()
-        self._position += len(b)
-        return len(b)
+        self._position += write_length
+        return write_length
 
     def _commit_blob(self) -> None:
         self._flush()
