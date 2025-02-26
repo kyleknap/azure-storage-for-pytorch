@@ -28,6 +28,7 @@ class BlobIO(io.IOBase):
     _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
     _READLINE_TERMINATOR = b"\n"
     _WRITE_BUFFER_SIZE = 4 * 1024 * 1024
+    _WAIT_FOR_WRITES = True
 
     def __init__(
         self,
@@ -271,7 +272,10 @@ class BlobIO(io.IOBase):
 
     def _flush(self) -> None:
         if self._write_buffer:
-            self._stage_block_ids.extend(self._client.stage_blocks(memoryview(self._write_buffer)))
+            stage_method = self._client.stage_blocks
+            if not self._WAIT_FOR_WRITES:
+                stage_method = self._client.stage_blocks_no_wait
+            self._stage_block_ids.extend(stage_method(memoryview(self._write_buffer)))
             self._write_buffer = bytearray()
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
@@ -284,7 +288,10 @@ class BlobIO(io.IOBase):
 
     def _commit_blob(self) -> None:
         self._flush()
-        self._client.commit_block_list(self._stage_block_ids)
+        block_ids = self._stage_block_ids
+        if not self._WAIT_FOR_WRITES:
+            block_ids = [f.result() for f in self._stage_block_ids]
+        self._client.commit_block_list(block_ids)
 
     def _close_client(self) -> None:
         if not self._closed:

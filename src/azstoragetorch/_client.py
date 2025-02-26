@@ -88,6 +88,18 @@ class AzStorageTorchBlobClient:
         else:
             return self._stage_blocks_in_parallel(data, stage_block_partitions)
 
+    def stage_blocks_no_wait(self, data: _SUPPORTED_BYTES_LIKE) -> List[concurrent.futures.Future[str]]:
+        if not data:
+            raise ValueError("Data must not be empty.")
+        stage_block_partitions = self._get_stage_block_partitions(data)
+        if len(stage_block_partitions) == 1:
+            return [self._executor.submit(self._stage_block, data)]
+        else:
+            futures = []
+            for pos, length in stage_block_partitions:
+                futures.append(self._executor.submit(self._stage_block, data[pos : pos + length]))
+            return futures
+
     def commit_block_list(self, block_ids: List[str]) -> None:
         self._sdk_blob_client.commit_block_list(block_ids)
 
