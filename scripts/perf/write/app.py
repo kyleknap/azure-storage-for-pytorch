@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import time
-from io import BytesIO
+from io import BytesIO, IOBase
 
 import hydra
 import hydra.core.hydra_config
@@ -17,6 +17,20 @@ LOGGER = logging.getLogger(__name__)
 
 ROOTDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_MODELS_DIR = os.path.join(ROOTDIR, "local-models")
+
+
+class NoopIO(IOBase):
+    def writable(self):
+        return True
+
+    def write(self, b):
+        return len(b)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
 
 
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
@@ -79,6 +93,8 @@ def get_writeable_file(cfg, **kwargs):
         return tempfile.TemporaryFile("wb")
     elif filelike_impl_name == "bytesio":
         return BytesIO()
+    elif filelike_impl_name == "noop":
+        return NoopIO()
     elif filelike_impl_name == "adlfs":
         fs = adlfs.AzureBlobFileSystem(
             account_name=cfg["blob"]["account"],
