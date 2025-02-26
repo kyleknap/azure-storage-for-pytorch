@@ -40,7 +40,7 @@ class AzStorageTorchBlobClient:
     _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
     _PARTITION_SIZE = 16 * 1024 * 1024
     _NUM_DOWNLOAD_ATTEMPTS = 3
-    _STAGE_BLOCK_SIZE = 4 * 1024 * 1024
+    _STAGE_BLOCK_SIZE = 32 * 1024 * 1024
     _RETRYABLE_READ_EXCEPTIONS = (
         azure.core.exceptions.IncompleteReadError,
         azure.core.exceptions.HttpResponseError,
