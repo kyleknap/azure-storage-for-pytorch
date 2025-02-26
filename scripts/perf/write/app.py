@@ -71,7 +71,10 @@ def get_writeable_file(cfg, **kwargs):
         sas_token = retrieve_sas_token(cfg)
         if sas_token is not None:
             blob_url += "?" + sas_token
-        return BlobIO(blob_url, mode="wb")
+        blob_io = BlobIO(blob_url, mode="wb")
+        if filelike_impl_name == "blobio-no-wait":
+            blob_io._WAIT_FOR_WRITES = False
+        return blob_io
     elif filelike_impl_name == "open":
         return tempfile.TemporaryFile("wb")
     elif filelike_impl_name == "bytesio":
