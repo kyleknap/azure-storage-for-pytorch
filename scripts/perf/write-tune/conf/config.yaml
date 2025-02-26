@@ -1,0 +1,20 @@
+defaults:
+  - model: 1GB
+  - write-method: torch-save
+  - _self_
+
+blob:
+  account: azstoragetorchdev
+  container: models
+  sas-env-var: AZURE_STORAGE_SAS_TOKEN
+
+num-runs: 1
+block-size: 33554432
+
+hydra:
+  sweeper:
+    params:
+      num-runs: 10
+      write-method: torch-save,writeall
+      model: 100KB,100MB,1GB,50GB
+      ++block-size: 4194304,8388608,16777216,33554432,67108864
