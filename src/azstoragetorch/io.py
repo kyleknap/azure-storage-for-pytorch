@@ -272,7 +272,6 @@ class BlobIO(io.IOBase):
         raise ValueError(f"Unsupported whence: {whence}")
 
     def _flush(self, wait=True) -> None:
-        # TODO: Check either here or in write to see if there any errors prior to uploading more data.
         if self._write_buffer:
             futures = self._client.stage_blocks(memoryview(self._write_buffer))
             self._all_stage_block_futures.extend(futures)
@@ -282,6 +281,7 @@ class BlobIO(io.IOBase):
             self._wait_for_stage_block_futures()
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
+        self._raise_any_stage_block_exceptions()
         write_length = len(b)
         self._write_buffer.extend(b)
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
@@ -294,6 +294,15 @@ class BlobIO(io.IOBase):
         self._flush()
         block_ids = [f.result() for f in self._all_stage_block_futures]
         self._client.commit_block_list(block_ids)
+
+    def _raise_any_stage_block_exceptions(self) -> None:
+        futures_still_in_progress = []
+        for future in self._in_progress_stage_block_futures:
+            if future.done() and future.exception() is not None:
+                raise future.exception()
+            else:
+                futures_still_in_progress.append(future)
+        self._in_progress_stage_block_futures = futures_still_in_progress
 
     def _wait_for_stage_block_futures(self) -> None:
         for future in self._in_progress_stage_block_futures:
