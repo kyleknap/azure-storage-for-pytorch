@@ -9,7 +9,9 @@ import functools
 import io
 import logging
 import math
+import os
 import random
+import threading
 import time
 import uuid
 from typing import Optional, List, Tuple, Iterator, Union
@@ -46,6 +48,9 @@ class AzStorageTorchBlobClient:
         azure.core.exceptions.HttpResponseError,
         azure.core.exceptions.DecodeError,
     )
+    # TODO: Max this based on executor max workers
+    _MAX_INFLIGHT_STAGE_BLOCKS = min(32, (os.cpu_count() or 1) + 4)
+
 
     def __init__(
         self,
@@ -57,6 +62,7 @@ class AzStorageTorchBlobClient:
         if executor is None:
             executor = concurrent.futures.ThreadPoolExecutor()
         self._executor = executor
+        self._stage_block_semaphore = threading.Semaphore(self._MAX_INFLIGHT_STAGE_BLOCKS)
 
     @classmethod
     def from_blob_url(
@@ -79,26 +85,17 @@ class AzStorageTorchBlobClient:
         else:
             return self._partitioned_download(offset, length)
 
-    def stage_blocks(self, data: _SUPPORTED_BYTES_LIKE) -> List[str]:
+    def stage_blocks(self, data: _SUPPORTED_BYTES_LIKE) -> List[concurrent.futures.Future[str]]:
         if not data:
             raise ValueError("Data must not be empty.")
         stage_block_partitions = self._get_stage_block_partitions(data)
-        if len(stage_block_partitions) == 1:
-            return [self._stage_block(data)]
-        else:
-            return self._stage_blocks_in_parallel(data, stage_block_partitions)
-
-    def stage_blocks_no_wait(self, data: _SUPPORTED_BYTES_LIKE) -> List[concurrent.futures.Future[str]]:
-        if not data:
-            raise ValueError("Data must not be empty.")
-        stage_block_partitions = self._get_stage_block_partitions(data)
-        if len(stage_block_partitions) == 1:
-            return [self._executor.submit(self._stage_block, data)]
-        else:
-            futures = []
-            for pos, length in stage_block_partitions:
-                futures.append(self._executor.submit(self._stage_block, data[pos : pos + length]))
-            return futures
+        futures = []
+        for pos, length in stage_block_partitions:
+            self._stage_block_semaphore.acquire()
+            future = self._executor.submit(self._stage_block, data[pos : pos + length])
+            future.add_done_callback(self._release_stage_block_semaphore_callback)
+            futures.append(future)
+        return futures
 
     def commit_block_list(self, block_ids: List[str]) -> None:
         self._sdk_blob_client.commit_block_list(block_ids)
@@ -193,15 +190,10 @@ class AzStorageTorchBlobClient:
     def _get_stage_block_partitions(self, data: bytes) -> List[Tuple[int, int]]:
         return self._get_partitions(0, len(data), self._STAGE_BLOCK_SIZE)
 
-    def _stage_blocks_in_parallel(self, data: _SUPPORTED_BYTES_LIKE, stage_block_partitions: List[Tuple[int, int]]) -> List[str]:
-        return list(
-            self._executor.map(
-                self._stage_block,
-                (data[pos : pos + length] for pos, length in stage_block_partitions),
-            )
-        )
-
     def _stage_block(self, data: bytes) -> None:
         block_id = str(uuid.uuid4())
         self._sdk_blob_client.stage_block(block_id, data)
         return block_id
+
+    def _release_stage_block_semaphore_callback(self, future: concurrent.futures.Future) -> None:
+        self._stage_block_semaphore.release()

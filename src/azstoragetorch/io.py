@@ -55,7 +55,8 @@ class BlobIO(io.IOBase):
         #  gains in regards to reducing the number of copies performed when consuming from buffer.
         self._readline_buffer = b""
         self._write_buffer = bytearray()
-        self._stage_block_ids = []
+        self._all_stage_block_futures = []
+        self._in_progress_stage_block_futures = []
 
     def close(self) -> None:
         if not self.closed and self.writable():
@@ -270,28 +271,34 @@ class BlobIO(io.IOBase):
             return self._client.get_blob_size() + offset
         raise ValueError(f"Unsupported whence: {whence}")
 
-    def _flush(self) -> None:
+    def _flush(self, wait=True) -> None:
+        # TODO: Check either here or in write to see if there any errors prior to uploading more data.
         if self._write_buffer:
-            stage_method = self._client.stage_blocks
-            if not self._WAIT_FOR_WRITES:
-                stage_method = self._client.stage_blocks_no_wait
-            self._stage_block_ids.extend(stage_method(memoryview(self._write_buffer)))
+            futures = self._client.stage_blocks(memoryview(self._write_buffer))
+            self._all_stage_block_futures.extend(futures)
+            self._in_progress_stage_block_futures.extend(futures)
             self._write_buffer = bytearray()
+        if wait:
+            self._wait_for_stage_block_futures()
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
         write_length = len(b)
         self._write_buffer.extend(b)
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
-            self._flush()
+            self._flush(wait=False)
         self._position += write_length
         return write_length
 
     def _commit_blob(self) -> None:
+        # TODO: See if this is ok if it throws again when closing after a write error
         self._flush()
-        block_ids = self._stage_block_ids
-        if not self._WAIT_FOR_WRITES:
-            block_ids = [f.result() for f in self._stage_block_ids]
+        block_ids = [f.result() for f in self._all_stage_block_futures]
         self._client.commit_block_list(block_ids)
+
+    def _wait_for_stage_block_futures(self) -> None:
+        for future in self._in_progress_stage_block_futures:
+            future.result()
+        self._in_progress_stage_block_futures = []
 
     def _close_client(self) -> None:
         if not self._closed:
