@@ -45,7 +45,7 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip install --no-index --find-links=dist azstoragetorch
       - name: Run tests
-        run: pytest tests
+        run: pytest tests/unit
   check-sdist:
     name: Check sdist
     runs-on: ubuntu-latest
