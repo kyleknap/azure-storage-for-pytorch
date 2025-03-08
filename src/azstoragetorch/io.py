@@ -4,6 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 
+import concurrent.futures
 import io
 import os
 from typing import get_args, Optional, Union, Literal, Type
@@ -17,6 +18,7 @@ from azure.core.credentials import (
 
 from azstoragetorch._client import SDK_CREDENTIAL_TYPE as _SDK_CREDENTIAL_TYPE
 from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBlobClient
+from azstoragetorch.exceptions import FatalBlobIOWriteError
 
 
 _SUPPORTED_MODES = Literal["rb", "wb"]
@@ -28,7 +30,6 @@ class BlobIO(io.IOBase):
     _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
     _READLINE_TERMINATOR = b"\n"
     _WRITE_BUFFER_SIZE = 32 * 1024 * 1024
-    _WAIT_FOR_WRITES = True
 
     def __init__(
         self,
@@ -57,12 +58,21 @@ class BlobIO(io.IOBase):
         self._write_buffer = bytearray()
         self._all_stage_block_futures = []
         self._in_progress_stage_block_futures = []
+        self._stage_block_exception = None
 
     def close(self) -> None:
-        if not self.closed and self.writable():
-            self._commit_blob()
-        self._close_client()
-        self._closed = True
+        if self.closed:
+            return
+        try:
+            # Any errors that occur while flushing or committing the block list are considered non-recoverable
+            # when using the BlobIO interface. So if an error occurs, we still close the BlobIO to further indicate
+            # that a new BlobIO instance will be needed and also avoid possibly calling the flush/commit logic again
+            # during garbage collection.
+            if self.writable():
+                self._commit_blob()
+        finally:
+            self._close_client()
+            self._closed = True
 
     @property
     def closed(self) -> bool:
@@ -271,47 +281,61 @@ class BlobIO(io.IOBase):
             return self._client.get_blob_size() + offset
         raise ValueError(f"Unsupported whence: {whence}")
 
-    def _flush(self, wait=True) -> None:
+    def _flush(self) -> None:
+        self._check_for_stage_block_exceptions(wait=False)
+        self._flush_write_buffer()
+        self._check_for_stage_block_exceptions(wait=True)
+
+    def _flush_write_buffer(self) -> None:
         if self._write_buffer:
             futures = self._client.stage_blocks(memoryview(self._write_buffer))
             self._all_stage_block_futures.extend(futures)
             self._in_progress_stage_block_futures.extend(futures)
             self._write_buffer = bytearray()
-        if wait:
-            self._wait_for_stage_block_futures()
 
     def _write(self, b: Union[bytes, bytearray]) -> int:
-        self._raise_any_stage_block_exceptions()
+        self._check_for_stage_block_exceptions(wait=False)
         write_length = len(b)
         self._write_buffer.extend(b)
         if len(self._write_buffer) >= self._WRITE_BUFFER_SIZE:
-            self._flush(wait=False)
+            self._flush_write_buffer()
         self._position += write_length
         return write_length
 
     def _commit_blob(self) -> None:
-        # TODO: See if this is ok if it throws again when closing after a write error
         self._flush()
         block_ids = [f.result() for f in self._all_stage_block_futures]
         self._client.commit_block_list(block_ids)
 
-    def _raise_any_stage_block_exceptions(self) -> None:
+    def _check_for_stage_block_exceptions(self, wait=True) -> None:
+        # Before doing any additional processing, raise if an exception has already
+        # been processed especially if it is going to require us to wait for all
+        # in-progress futures to complete.
+        self._raise_if_fatal_write_error()
+        self._process_stage_block_futures_for_errors(wait)
+
+    def _process_stage_block_futures_for_errors(self, wait) -> None:
+        if wait:
+            concurrent.futures.wait(
+                self._in_progress_stage_block_futures,
+                return_when=concurrent.futures.FIRST_EXCEPTION,
+            )
         futures_still_in_progress = []
         for future in self._in_progress_stage_block_futures:
-            if future.done() and future.exception() is not None:
-                raise future.exception()
+            if future.done():
+                if self._stage_block_exception is None and future.exception() is not None:
+                    self._stage_block_exception = future.exception()
             else:
                 futures_still_in_progress.append(future)
         self._in_progress_stage_block_futures = futures_still_in_progress
+        self._raise_if_fatal_write_error()
 
-    def _wait_for_stage_block_futures(self) -> None:
-        for future in self._in_progress_stage_block_futures:
-            future.result()
-        self._in_progress_stage_block_futures = []
+    def _raise_if_fatal_write_error(self):
+        if self._stage_block_exception is not None:
+            raise FatalBlobIOWriteError(self._stage_block_exception)
 
     def _close_client(self) -> None:
-        if not self._closed:
-            self._client.close()
+        self._client.close()
 
     def _is_at_end_of_blob(self) -> bool:
         return self._position >= self._client.get_blob_size()

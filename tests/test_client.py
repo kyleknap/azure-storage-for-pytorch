@@ -21,7 +21,7 @@ from azstoragetorch._client import AzStorageTorchBlobClient
 MB = 1024 * 1024
 DEFAULT_PARTITION_DOWNLOAD_THRESHOLD = 16 * MB
 DEFAULT_PARTITION_SIZE = 16 * MB
-DEFAULT_BLOCK_SIZE = 4 * MB
+DEFAULT_BLOCK_SIZE = 32 * MB
 EXPECTED_RETRYABLE_READ_EXCEPTIONS = [
     azure.core.exceptions.IncompleteReadError,
     azure.core.exceptions.HttpResponseError,
@@ -125,6 +125,10 @@ class TestAzStorageTorchBlobClient:
             mock_generated_sdk_storage_client.blob.download.call_args_list
             == expected_download_calls
         )
+
+    def assert_stage_block_ids(self, stage_block_futures, expected_block_ids):
+        actual_block_ids = [future.result() for future in stage_block_futures]
+        assert actual_block_ids == expected_block_ids
 
     def test_from_blob_url(self, blob_url, mock_sdk_blob_client):
         credential = AzureSasCredential("sas")
@@ -416,6 +420,7 @@ class TestAzStorageTorchBlobClient:
         [
             bytes,
             bytearray,
+            memoryview,
         ],
     )
     @pytest.mark.parametrize(
@@ -438,9 +443,16 @@ class TestAzStorageTorchBlobClient:
             mock.call(str(i), content[start:end])
             for i, (start, end) in enumerate(expected_stage_block_partitions)
         ]
-        assert azstoragetorch_blob_client.stage_blocks(content) == expected_block_ids
+        stage_block_futures = azstoragetorch_blob_client.stage_blocks(content)
+        self.assert_stage_block_ids(stage_block_futures, expected_block_ids)
         assert mock_sdk_blob_client.stage_block.call_args_list == expected_stage_block_calls
         assert mock_uuid4.call_count == len(expected_stage_block_partitions)
+
+    def test_stage_blocks_returns_error_in_future(self, azstoragetorch_blob_client, mock_sdk_blob_client):
+        mock_sdk_blob_client.stage_block.side_effect = azure.core.exceptions.AzureError("message")
+        stage_block_futures = azstoragetorch_blob_client.stage_blocks(random_bytes(8))
+        with pytest.raises(azure.core.exceptions.AzureError):
+            stage_block_futures[0].result()
 
 
     @pytest.mark.parametrize(
@@ -448,6 +460,8 @@ class TestAzStorageTorchBlobClient:
         [
             b"",
             bytearray(),
+            memoryview(b""),
+            memoryview(bytearray()),
         ]
     )
     def test_stage_blocks_raises_on_empty_data(self, empty_content, azstoragetorch_blob_client):

@@ -3,6 +3,8 @@
 # Licensed under the MIT License. See LICENSE in the project root for
 # license information.
 # --------------------------------------------------------------------------
+
+from concurrent.futures import Future
 import io
 import os
 import random
@@ -11,14 +13,16 @@ from unittest import mock
 import pytest
 
 from azure.core.credentials import AzureSasCredential, AzureNamedKeyCredential
+from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 
+from azstoragetorch.exceptions import FatalBlobIOWriteError
 from azstoragetorch.io import BlobIO
 from azstoragetorch._client import AzStorageTorchBlobClient
 
 
 EXPECTED_DEFAULT_READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
-EXPECTED_FLUSH_THRESHOLD = 4 * 1024 * 1024
+EXPECTED_FLUSH_THRESHOLD = 32 * 1024 * 1024
 
 
 @pytest.fixture
@@ -75,6 +79,21 @@ def random_ascii_letter_bytes(size):
 # TODO: Should break this out to a fixture or shared utility. It's in test_io.py
 def random_bytes(size):
     return os.urandom(size)
+
+
+def add_stage_blocks_results(mock_azstoragetorch_blob_client, *stage_blocks_results):
+    side_effects = []
+    for stage_blocks_result in stage_blocks_results:
+        futures = []
+        for stage_block_result in stage_blocks_result:
+            future = Future()
+            if isinstance(stage_block_result, Exception):
+                future.set_exception(stage_block_result)
+            else:
+                future.set_result(stage_block_result)
+            futures.append(future)
+        side_effects.append(futures)
+    mock_azstoragetorch_blob_client.stage_blocks.side_effect = side_effects
 
 
 class TestBlobIO:
@@ -232,7 +251,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.close.assert_called_once()
 
     def test_close_initiates_commit_block_list(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         writable_blob_io.write(random_bytes(EXPECTED_FLUSH_THRESHOLD))
         mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
         writable_blob_io.close()
@@ -240,7 +259,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.commit_block_list.assert_called_once_with(["00"])
 
     def test_close_only_commits_block_list_once(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         writable_blob_io.write(random_bytes(EXPECTED_FLUSH_THRESHOLD))
         mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
         writable_blob_io.close()
@@ -252,7 +271,7 @@ class TestBlobIO:
         # NOTE: Using the factory here instead of the writeable_blob fixture to make sure there are no
         # additional references and del actually closes the blob due to no more references.
         blob_io = create_blob_io(mode="wb")
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         blob_io.write(random_bytes(EXPECTED_FLUSH_THRESHOLD))
         mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
         del blob_io
@@ -746,7 +765,7 @@ class TestBlobIO:
         ]
     )
     def test_write(self, bytes_like_type, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         content = bytes_like_type(random_bytes(EXPECTED_FLUSH_THRESHOLD))
         with writable_blob_io:
             assert writable_blob_io.write(content) == len(content)
@@ -760,11 +779,7 @@ class TestBlobIO:
         )
 
     def test_write_multiple_times(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.side_effect = [
-            ["00"],
-            ["01", "02"],
-            ["03"],
-        ]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"], ["01", "02"], ["03"])
         writes = [
             random_bytes(EXPECTED_FLUSH_THRESHOLD),
             random_bytes(EXPECTED_FLUSH_THRESHOLD*2),
@@ -783,7 +798,7 @@ class TestBlobIO:
         )
 
     def test_write_caches_small_writes_and_uploads_with_large_writes(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.side_effect = [["00"], ["01"]]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"], ["01"])
         with writable_blob_io:
             # First write is small and should just be cached
             assert writable_blob_io.write(b"a") == 1
@@ -811,7 +826,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.commit_block_list.assert_called_once_with(["00", "01"])
 
     def test_write_caches_until_reaches_threshold(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         with writable_blob_io:
             writable_blob_io.write(b"a" * (EXPECTED_FLUSH_THRESHOLD - 1))
             assert writable_blob_io.tell() == EXPECTED_FLUSH_THRESHOLD - 1
@@ -823,7 +838,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.commit_block_list.assert_called_once_with(["00"])
 
     def test_small_writes_flushed_on_close(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.return_value = ["00"]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
         with writable_blob_io:
             assert writable_blob_io.write(b'a') == 1
             assert writable_blob_io.write(b'b') == 1
@@ -833,7 +848,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.commit_block_list.assert_called_once_with(["00"])
 
     def test_write_flushes_remaining_small_writes_on_close(self, writable_blob_io, mock_azstoragetorch_blob_client):
-        mock_azstoragetorch_blob_client.stage_blocks.side_effect = [["00"], ["01"]]
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"], ["01"])
         with writable_blob_io:
             large_write = random_bytes(EXPECTED_FLUSH_THRESHOLD)
             assert writable_blob_io.write(large_write) == len(large_write)
@@ -874,3 +889,62 @@ class TestBlobIO:
     def test_write_raises_for_unsupported_types(self, unsupported_write_type, writable_blob_io):
         with pytest.raises(TypeError, match="Unsupported type for write"):
             writable_blob_io.write(unsupported_write_type)
+
+    def test_writelines(self, writable_blob_io, mock_azstoragetorch_blob_client):
+        lines = [b"line1\n", b"line2\n", b"line3\n"]
+        expected_stage_blocks_content = b"".join(lines)
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, ["00"])
+        with writable_blob_io:
+            writable_blob_io.writelines(lines)
+            assert writable_blob_io.tell() == len(expected_stage_blocks_content)
+        mock_azstoragetorch_blob_client.stage_blocks.assert_called_once_with(expected_stage_blocks_content)
+        mock_azstoragetorch_blob_client.commit_block_list.assert_called_once_with(["00"])
+
+    def test_truncate_not_supported(self, writable_blob_io):
+        with pytest.raises(io.UnsupportedOperation, match="truncate"):
+            writable_blob_io.truncate()
+
+    @pytest.mark.parametrize(
+        "method,args,content_size,stage_block_results",
+        [
+            ("flush", [], 8, [[AzureError("error")]]),
+            ("flush", [], EXPECTED_FLUSH_THRESHOLD + 1, [["00", AzureError("error")]]),
+            ("close", [], 8, [[AzureError("error")]]),
+            ("close", [], EXPECTED_FLUSH_THRESHOLD + 1, [["00", AzureError("error")]]),
+            # Case where subsequent write() after data has been staged fast fails even if it would
+            # not result in a stage block happening
+            ("write", [b"more-content"], EXPECTED_FLUSH_THRESHOLD, [[AzureError("error")]]),
+        ],
+    )
+    def test_propagates_stage_block_errors(self, method, args, content_size, stage_block_results, writable_blob_io, mock_azstoragetorch_blob_client):
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, *stage_block_results)
+        writable_blob_io.write(random_bytes(content_size))
+        with pytest.raises(FatalBlobIOWriteError):
+            getattr(writable_blob_io, method)(*args)
+        mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "method,args",
+        [
+            ("flush", []),
+            ("close", []),
+            ("write", [b"more-content"]),
+        ],
+    )
+    def test_continues_to_throw_after_first_fatal_error(self, method, args, writable_blob_io, mock_azstoragetorch_blob_client):
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, [AzureError('error')])
+        with pytest.raises(FatalBlobIOWriteError):
+            writable_blob_io.write(b"content")
+            writable_blob_io.flush()
+        # Any subsequent IO calls should throw even if they would have resulted in a noop
+        with pytest.raises(FatalBlobIOWriteError):
+            getattr(writable_blob_io, method)(*args)
+        mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
+
+    def test_context_manager_propagates_error(self, writable_blob_io, mock_azstoragetorch_blob_client):
+        add_stage_blocks_results(mock_azstoragetorch_blob_client, [AzureError('error')])
+        with pytest.raises(FatalBlobIOWriteError):
+            with writable_blob_io:
+                writable_blob_io.write(b"content")
+        mock_azstoragetorch_blob_client.commit_block_list.assert_not_called()
+        assert writable_blob_io.closed
