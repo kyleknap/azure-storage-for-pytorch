@@ -7,7 +7,7 @@
 import concurrent.futures
 import io
 import os
-from typing import get_args, Optional, Union, Literal, Type
+from typing import get_args, Optional, Union, Literal, Type, List
 import urllib.parse
 
 from azure.identity import DefaultAzureCredential
@@ -17,12 +17,15 @@ from azure.core.credentials import (
 )
 
 from azstoragetorch._client import SDK_CREDENTIAL_TYPE as _SDK_CREDENTIAL_TYPE
+from azstoragetorch._client import (
+    SUPPORTED_WRITE_BYTES_LIKE_TYPE as _SUPPORTED_WRITE_TYPES,
+)
+from azstoragetorch._client import STAGE_BLOCK_FUTURE_TYPE as _STAGE_BLOCK_FUTURE_TYPE
 from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBlobClient
 from azstoragetorch.exceptions import FatalBlobIOWriteError
 
 
 _SUPPORTED_MODES = Literal["rb", "wb"]
-_SUPPORTED_WRITE_TYPES = Union[bytes, bytearray, memoryview]
 _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
@@ -56,9 +59,9 @@ class BlobIO(io.IOBase):
         #  gains in regards to reducing the number of copies performed when consuming from buffer.
         self._readline_buffer = b""
         self._write_buffer = bytearray()
-        self._all_stage_block_futures = []
-        self._in_progress_stage_block_futures = []
-        self._stage_block_exception = None
+        self._all_stage_block_futures: List[_STAGE_BLOCK_FUTURE_TYPE] = []
+        self._in_progress_stage_block_futures: List[_STAGE_BLOCK_FUTURE_TYPE] = []
+        self._stage_block_exception: Optional[BaseException] = None
 
     def close(self) -> None:
         if self.closed:
@@ -293,7 +296,7 @@ class BlobIO(io.IOBase):
             self._in_progress_stage_block_futures.extend(futures)
             self._write_buffer = bytearray()
 
-    def _write(self, b: Union[bytes, bytearray]) -> int:
+    def _write(self, b: _SUPPORTED_WRITE_TYPES) -> int:
         self._check_for_stage_block_exceptions(wait=False)
         write_length = len(b)
         self._write_buffer.extend(b)
@@ -305,16 +308,26 @@ class BlobIO(io.IOBase):
     def _commit_blob(self) -> None:
         self._flush()
         block_ids = [f.result() for f in self._all_stage_block_futures]
+        self._raise_if_duplicate_block_ids(block_ids)
         self._client.commit_block_list(block_ids)
 
-    def _check_for_stage_block_exceptions(self, wait=True) -> None:
+    def _raise_if_duplicate_block_ids(self, block_ids: str) -> None:
+        # An additional safety measure to ensure we never reuse block IDs within a BlobIO instance. This
+        # should not be an issue with UUID4 for block IDs, but that may not always be the case if
+        # block ID generation changes in the future.
+        if len(block_ids) != len(set(block_ids)):
+            raise RuntimeError(
+                "Unexpected duplicate block IDs detected. Not committing blob."
+            )
+
+    def _check_for_stage_block_exceptions(self, wait: bool = True) -> None:
         # Before doing any additional processing, raise if an exception has already
         # been processed especially if it is going to require us to wait for all
         # in-progress futures to complete.
         self._raise_if_fatal_write_error()
         self._process_stage_block_futures_for_errors(wait)
 
-    def _process_stage_block_futures_for_errors(self, wait) -> None:
+    def _process_stage_block_futures_for_errors(self, wait: bool) -> None:
         if wait:
             concurrent.futures.wait(
                 self._in_progress_stage_block_futures,
@@ -323,14 +336,17 @@ class BlobIO(io.IOBase):
         futures_still_in_progress = []
         for future in self._in_progress_stage_block_futures:
             if future.done():
-                if self._stage_block_exception is None and future.exception() is not None:
+                if (
+                    self._stage_block_exception is None
+                    and future.exception() is not None
+                ):
                     self._stage_block_exception = future.exception()
             else:
                 futures_still_in_progress.append(future)
         self._in_progress_stage_block_futures = futures_still_in_progress
         self._raise_if_fatal_write_error()
 
-    def _raise_if_fatal_write_error(self):
+    def _raise_if_fatal_write_error(self) -> None:
         if self._stage_block_exception is not None:
             raise FatalBlobIOWriteError(self._stage_block_exception)
 
