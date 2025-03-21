@@ -7,26 +7,16 @@
 import concurrent.futures
 import io
 import os
-from typing import get_args, Optional, Union, Literal, Type, List
-import urllib.parse
+from typing import get_args, Optional, Literal, List
 
-from azure.identity import DefaultAzureCredential
-from azure.core.credentials import (
-    AzureSasCredential,
-    TokenCredential,
-)
+import azure.storage.blob
 
-from azstoragetorch._client import SDK_CREDENTIAL_TYPE as _SDK_CREDENTIAL_TYPE
-from azstoragetorch._client import (
-    SUPPORTED_WRITE_BYTES_LIKE_TYPE as _SUPPORTED_WRITE_TYPES,
-)
-from azstoragetorch._client import STAGE_BLOCK_FUTURE_TYPE as _STAGE_BLOCK_FUTURE_TYPE
-from azstoragetorch._client import AzStorageTorchBlobClient as _AzStorageTorchBlobClient
+from azstoragetorch import _client
+from azstoragetorch import _utils
 from azstoragetorch.exceptions import FatalBlobIOWriteError
 
 
 _SUPPORTED_MODES = Literal["rb", "wb"]
-_AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
@@ -39,7 +29,7 @@ class BlobIO(io.IOBase):
         blob_url: str,
         mode: _SUPPORTED_MODES,
         *,
-        credential: _AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         **_internal_only_kwargs,
     ):
         self._blob_url = blob_url
@@ -48,9 +38,8 @@ class BlobIO(io.IOBase):
         self._client = self._get_azstoragetorch_blob_client(
             blob_url,
             credential,
-            _internal_only_kwargs.get(
-                "azstoragetorch_blob_client_cls", _AzStorageTorchBlobClient
-            ),
+            _internal_only_kwargs.get("azstoragetorch_blob_client_factory"),
+            _internal_only_kwargs.get("blob_properties"),
         )
 
         self._position = 0
@@ -59,8 +48,8 @@ class BlobIO(io.IOBase):
         #  gains in regards to reducing the number of copies performed when consuming from buffer.
         self._readline_buffer = b""
         self._write_buffer = bytearray()
-        self._all_stage_block_futures: List[_STAGE_BLOCK_FUTURE_TYPE] = []
-        self._in_progress_stage_block_futures: List[_STAGE_BLOCK_FUTURE_TYPE] = []
+        self._all_stage_block_futures: List[_client.STAGE_BLOCK_FUTURE_TYPE] = []
+        self._in_progress_stage_block_futures: List[_client.STAGE_BLOCK_FUTURE_TYPE] = []
         self._stage_block_exception: Optional[BaseException] = None
 
     def close(self) -> None:
@@ -74,6 +63,8 @@ class BlobIO(io.IOBase):
             if self.writable():
                 self._commit_blob()
         finally:
+            # TODO: We need to figure out if we actually want to close the executor here cause if we share it as part of
+            # a dataset we may not want to close it to avoid spinning up threads and closing them all the time.
             self._close_client()
             self._closed = True
 
@@ -125,7 +116,7 @@ class BlobIO(io.IOBase):
         self._validate_not_closed()
         return self._position
 
-    def write(self, b: _SUPPORTED_WRITE_TYPES, /) -> int:
+    def write(self, b: _client.SUPPORTED_WRITE_BYTES_LIKE_TYPE, /) -> int:
         self._validate_supported_write_type(b)
         self._validate_writable()
         self._validate_not_closed()
@@ -151,10 +142,10 @@ class BlobIO(io.IOBase):
                 f"{param_name} must be greater than or equal to {min_value}"
             )
 
-    def _validate_supported_write_type(self, b: _SUPPORTED_WRITE_TYPES) -> None:
-        if not isinstance(b, get_args(_SUPPORTED_WRITE_TYPES)):
+    def _validate_supported_write_type(self, b: _client.SUPPORTED_WRITE_BYTES_LIKE_TYPE) -> None:
+        if not isinstance(b, get_args(_client.SUPPORTED_WRITE_BYTES_LIKE_TYPE)):
             raise TypeError(
-                f"Unsupported type for write: {type(b)}. Supported types: {get_args(_SUPPORTED_WRITE_TYPES)}"
+                f"Unsupported type for write: {type(b)}. Supported types: {get_args(_client.SUPPORTED_WRITE_BYTES_LIKE_TYPE)}"
             )
 
     def _validate_readable(self) -> None:
@@ -187,33 +178,16 @@ class BlobIO(io.IOBase):
     def _get_azstoragetorch_blob_client(
         self,
         blob_url: str,
-        credential: _AZSTORAGETORCH_CREDENTIAL_TYPE,
-        azstoragetorch_blob_client_cls: Type[_AzStorageTorchBlobClient],
-    ) -> _AzStorageTorchBlobClient:
-        return azstoragetorch_blob_client_cls.from_blob_url(
-            blob_url,
-            self._get_sdk_credential(blob_url, credential),
+        credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE,
+        azstoragetorch_blob_client_factory: Optional[_client.AzStorageTorchBlobClientFactory] = None,
+        blob_properties: Optional[azure.storage.blob.BlobProperties] = None,
+    ) -> _client.AzStorageTorchBlobClient:
+        sdk_credential = _utils.to_sdk_credential(blob_url, credential)
+        if azstoragetorch_blob_client_factory is None:
+            azstoragetorch_blob_client_factory = _client.AzStorageTorchBlobClientFactory()
+        return azstoragetorch_blob_client_factory.get_blob_client(
+            blob_url, sdk_credential, blob_properties=blob_properties
         )
-
-    def _get_sdk_credential(
-        self, blob_url: str, credential: _AZSTORAGETORCH_CREDENTIAL_TYPE
-    ) -> _SDK_CREDENTIAL_TYPE:
-        if credential is False or self._blob_url_has_sas_token(blob_url):
-            return None
-        if credential is None:
-            return DefaultAzureCredential()
-        if isinstance(credential, (AzureSasCredential, TokenCredential)):
-            return credential
-        raise TypeError(f"Unsupported credential: {type(credential)}")
-
-    def _blob_url_has_sas_token(self, blob_url: str) -> bool:
-        parsed_url = urllib.parse.urlparse(blob_url)
-        if parsed_url.query is None:
-            return False
-        parsed_qs = urllib.parse.parse_qs(parsed_url.query)
-        # The signature is always required in a valid SAS token. So look for the "sig"
-        # key to determine if the URL has a SAS token.
-        return "sig" in parsed_qs
 
     def _readline(self, size: Optional[int]) -> bytes:
         consumed = b""
@@ -296,7 +270,7 @@ class BlobIO(io.IOBase):
             self._in_progress_stage_block_futures.extend(futures)
             self._write_buffer = bytearray()
 
-    def _write(self, b: _SUPPORTED_WRITE_TYPES) -> int:
+    def _write(self, b: _client.SUPPORTED_WRITE_BYTES_LIKE_TYPE) -> int:
         self._check_for_stage_block_exceptions(wait=False)
         write_length = len(b)
         self._write_buffer.extend(b)

@@ -16,26 +16,33 @@ import time
 import uuid
 from typing import Optional, List, Tuple, Iterator, Union, Type
 
-from azure.core.credentials import (
-    AzureSasCredential,
-    TokenCredential,
-)
 import azure.core.exceptions
 import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
 
+from azstoragetorch._utils import SDK_CREDENTIAL_TYPE
+
 
 _LOGGER = logging.getLogger(__name__)
 
-SDK_CREDENTIAL_TYPE = Optional[
-    Union[
-        AzureSasCredential,
-        TokenCredential,
-    ]
-]
 SUPPORTED_WRITE_BYTES_LIKE_TYPE = Union[bytes, bytearray, memoryview]
 STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future[str]
+
+
+class AzStorageTorchBlobClientFactory:
+    def __init__(self, sdk_credential: SDK_CREDENTIAL_TYPE):
+        self._sdk_credential = sdk_credential
+        # TODO: We probably want to share the executor and semaphore here.
+        # TODO: Figure out how to 1) instantiate from containr client and 2) share client resources
+        # given arbitrary blob urls
+
+    # Probably want to accept blob properties here too so we can proxy data from the list
+    def get_blob_client(self, blob_url: str, **kwargs) -> "AzStorageTorchBlobClient":
+        return AzStorageTorchBlobClient.from_blob_url(
+            blob_url, sdk_credential=self._sdk_credential
+        )
+    
 
 
 class AzStorageTorchBlobClient:
