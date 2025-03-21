@@ -311,7 +311,7 @@ class BlobIO(io.IOBase):
         self._raise_if_duplicate_block_ids(block_ids)
         self._client.commit_block_list(block_ids)
 
-    def _raise_if_duplicate_block_ids(self, block_ids: str) -> None:
+    def _raise_if_duplicate_block_ids(self, block_ids: List[str]) -> None:
         # An additional safety measure to ensure we never reuse block IDs within a BlobIO instance. This
         # should not be an issue with UUID4 for block IDs, but that may not always be the case if
         # block ID generation changes in the future.

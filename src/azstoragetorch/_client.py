@@ -35,11 +35,7 @@ SDK_CREDENTIAL_TYPE = Optional[
     ]
 ]
 SUPPORTED_WRITE_BYTES_LIKE_TYPE = Union[bytes, bytearray, memoryview]
-try:
-    STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future[str]
-except TypeError:
-    # Python <3.9 does not support generic typing for futures
-    STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future
+STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future[str]
 
 
 class AzStorageTorchBlobClient:
@@ -122,10 +118,12 @@ class AzStorageTorchBlobClient:
         # the max worker calculation from the executor class and inject it into both the executor
         # and semaphore
         #
-        # Note: Once we support Python 3.13, the default calculation for max workers for the executor
-        # uses os.process_cpu_count() instead. We should make sure to update the value here to match
-        # that as well for Python 3.13 environments.
-        return min(32, (os.cpu_count() or 1) + 4)
+        # In Python 3.13, os.process_cpu_count() was added and the ThreadPoolExecutor updated to
+        # use os.process_cpu_count() instead of os.cpu_count() when calculating default max workers.
+        # To match ThreadPoolExecutor defaults across Python versions, we use process_cpu_count
+        # if available, otherwise fall back to os.cpu_count().
+        cpu_count_fn = getattr(os, "process_cpu_count", os.cpu_count)
+        return min(32, (cpu_count_fn() or 1) + 4)
 
     @functools.cached_property
     def _blob_properties(self) -> azure.storage.blob.BlobProperties:

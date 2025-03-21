@@ -29,6 +29,7 @@ EXPECTED_RETRYABLE_READ_EXCEPTIONS = [
     azure.core.exceptions.HttpResponseError,
     azure.core.exceptions.DecodeError,
 ]
+PROCESS_CPU_COUNT_UNAVAILABLE = object()
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +165,45 @@ class TestAzStorageTorchBlobClient:
                 credential=credential,
                 connection_data_block_size=256 * 1024,
             )
+
+    @pytest.mark.parametrize(
+        "cpu_count,process_cpu_count,expected_max_workers",
+        [
+            (1, PROCESS_CPU_COUNT_UNAVAILABLE, 5),
+            (4, PROCESS_CPU_COUNT_UNAVAILABLE, 8),
+            (16, PROCESS_CPU_COUNT_UNAVAILABLE, 20),
+            # cpu_count reaches max_workers ceiling
+            (64, PROCESS_CPU_COUNT_UNAVAILABLE, 32),
+            # max_workers are still set even if cpu_count is None or 0
+            (None, PROCESS_CPU_COUNT_UNAVAILABLE, 5),
+            (0, PROCESS_CPU_COUNT_UNAVAILABLE, 5),
+            # proccess_cpu_count overrides cpu_count
+            (64, 1, 5),
+            # process_cpu_count reaches max_workers ceiling
+            (1, 64, 32),
+            # max_workers are set when both cpu_count and process_cpu_count are None or 0
+            (None, None, 5),
+            (0, 0, 5),
+        ],
+    )
+    def test_default_worker_count(
+        self,
+        mock_sdk_blob_client,
+        monkeypatch,
+        cpu_count,
+        process_cpu_count,
+        expected_max_workers,
+    ):
+        if process_cpu_count is PROCESS_CPU_COUNT_UNAVAILABLE:
+            monkeypatch.delattr(os, "process_cpu_count", raising=False)
+        else:
+            monkeypatch.setattr(
+                os, "process_cpu_count", lambda: process_cpu_count, raising=False
+            )
+        monkeypatch.setattr(os, "cpu_count", lambda: cpu_count)
+        with mock.patch("concurrent.futures.ThreadPoolExecutor") as mock_executor:
+            AzStorageTorchBlobClient(mock_sdk_blob_client)
+            mock_executor.assert_called_once_with(expected_max_workers)
 
     def test_get_blob_size(
         self, azstoragetorch_blob_client, mock_sdk_blob_client, blob_properties

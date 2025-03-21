@@ -60,7 +60,18 @@ def blob_io(create_blob_io):
 
 @pytest.fixture
 def writable_blob_io(create_blob_io):
-    return create_blob_io(mode="wb")
+    blob_io = create_blob_io(mode="wb")
+    yield blob_io
+    # For some of the tests, it purposely raises an exception during upload but may not actually close
+    # the blob as part of the test body (i.e. to keep the test body lean). Because close() is called as part
+    # of garbage collection of blob_io, error messages from FatalBlobIOWriteError may be displayed as part of
+    # test output even though the test passed. By closing the blob below, it ensures that blob_io has been
+    # closed prior to garbage collection and any FatalBlobIOWriteError from the upstream test is not propagated
+    # during garbage collection.
+    try:
+        blob_io.close()
+    except FatalBlobIOWriteError:
+        pass
 
 
 def random_ascii_letter_bytes(size):
