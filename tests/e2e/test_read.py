@@ -3,16 +3,14 @@
 # Licensed under the MIT License. See LICENSE in the project root for
 # license information.
 # --------------------------------------------------------------------------
-from dataclasses import dataclass
 import os
+import io
 import random
 import string
-
 import pytest
-from azstoragetorch.io import BlobIO
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient
 
+from dataclasses import dataclass
+from azstoragetorch.io import BlobIO
 
 _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
 
@@ -21,27 +19,6 @@ _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
 class Blob:
     data: bytes
     url: str
-
-
-@pytest.fixture(scope="module")
-def account_url():
-    account_name = os.environ.get("AZSTORAGETORCH_STORAGE_ACCOUNT_NAME")
-    if account_name is None:
-        raise ValueError(
-            f'"AZSTORAGETORCH_STORAGE_ACCOUNT_NAME" environment variable must be set to run end to end tests.'
-        )
-    return f"https://{account_name}.blob.core.windows.net"
-
-
-@pytest.fixture(scope="module")
-def container_client(account_url):
-    blob_service_client = BlobServiceClient(
-        account_url, credential=DefaultAzureCredential()
-    )
-    container_name = random_resource_name()
-    container = blob_service_client.create_container(name=container_name)
-    yield container
-    container.delete_container()
 
 
 @pytest.fixture(scope="module")
@@ -88,7 +65,6 @@ def upload_blob(account_url, container_client, data):
     blob_client = container_client.get_blob_client(blob=blob_name)
     blob_client.upload_blob(data)
     url = f"{account_url}/{container_client.container_name}/{blob_name}"
-
     return Blob(data=data, url=url)
 
 
@@ -125,5 +101,5 @@ class TestRead:
     def test_read_using_iter(self, small_with_newlines_blob):
         with BlobIO(small_with_newlines_blob.url, "rb") as f:
             lines = [line for line in f]
-            expected_lines = small_with_newlines_blob.data.splitlines(keepends=True)
+            expected_lines = io.BytesIO(small_with_newlines_blob.data).readlines()
             assert lines == expected_lines
