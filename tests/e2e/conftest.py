@@ -4,11 +4,11 @@
 # license information.
 # --------------------------------------------------------------------------
 import os
-import random
-import string
 import pytest
+
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
+from utils import random_resource_name
 
 
 @pytest.fixture(scope="package")
@@ -30,9 +30,3 @@ def container_client(account_url):
     container = blob_service_client.create_container(name=container_name)
     yield container
     container.delete_container()
-
-
-def random_resource_name(name_length=8):
-    return "".join(
-        random.choices(string.ascii_lowercase + string.digits, k=name_length)
-    )

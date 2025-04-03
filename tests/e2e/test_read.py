@@ -9,8 +9,10 @@ import random
 import string
 import pytest
 
-from dataclasses import dataclass
 from azstoragetorch.io import BlobIO
+from dataclasses import dataclass
+from utils import sample_data, random_resource_name
+
 
 _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
 
@@ -41,16 +43,6 @@ def small_with_newlines_blob(account_url, container_client):
 @pytest.fixture
 def blob(request):
     return request.getfixturevalue(f"{request.param}_blob")
-
-
-def random_resource_name(name_length=8):
-    return "".join(
-        random.choices(string.ascii_lowercase + string.digits, k=name_length)
-    )
-
-
-def sample_data(data_length=20):
-    return os.urandom(data_length)
 
 
 def sample_data_with_newlines(data_length=20, num_lines=1):
