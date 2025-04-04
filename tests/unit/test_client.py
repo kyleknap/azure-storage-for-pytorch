@@ -19,6 +19,7 @@ from azure.storage.blob._generated.models import ModifiedAccessConditions
 
 from azstoragetorch._client import AzStorageTorchBlobClient
 from tests.unit.utils import random_bytes
+from azstoragetorch._version import __version__
 
 MB = 1024 * 1024
 DEFAULT_PARTITION_DOWNLOAD_THRESHOLD = 16 * MB
@@ -164,6 +165,7 @@ class TestAzStorageTorchBlobClient:
                 blob_url,
                 credential=credential,
                 connection_data_block_size=256 * 1024,
+                user_agent=f"azstoragetorch/{__version__}",
             )
 
     @pytest.mark.parametrize(

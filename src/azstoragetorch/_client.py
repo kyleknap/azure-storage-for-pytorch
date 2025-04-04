@@ -24,6 +24,7 @@ import azure.core.exceptions
 import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
+from azstoragetorch._version import __version__
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class AzStorageTorchBlobClient:
     ):
         self._sdk_blob_client = sdk_blob_client
         self._generated_sdk_storage_client = self._sdk_blob_client._client
+        
         if max_in_flight_requests is None:
             max_in_flight_requests = self._get_max_in_flight_requests()
         if executor is None:
@@ -78,6 +80,7 @@ class AzStorageTorchBlobClient:
             blob_url,
             credential=sdk_credential,
             connection_data_block_size=cls._CONNECTION_DATA_BLOCK_SIZE,
+            user_agent=f"azstoragetorch/{__version__}",
         )
         return AzStorageTorchBlobClient(sdk_blob_client)
 
