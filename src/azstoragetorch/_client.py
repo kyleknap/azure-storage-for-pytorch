@@ -14,12 +14,16 @@ import random
 import threading
 import time
 import uuid
+import urllib.parse
 from typing import Optional, List, Tuple, Iterator, Union, Type
 
 import azure.core.exceptions
 import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
+from azure.storage.blob._shared.base_client import TransportWrapper
+from azure.core.pipeline.transport import RequestsTransport
+
 
 from azstoragetorch._utils import SDK_CREDENTIAL_TYPE
 
@@ -36,13 +40,105 @@ class AzStorageTorchBlobClientFactory:
         # TODO: We probably want to share the executor and semaphore here.
         # TODO: Figure out how to 1) instantiate from containr client and 2) share client resources
         # given arbitrary blob urls
+        self._client = None
+        self._sdk_client = None
+        self._sdk_container_client = None
+        self._transport = None
+        self._pipeline = None
+        self._blob_properties = None
+        self._blob_url = None
 
     # Probably want to accept blob properties here too so we can proxy data from the list
     def get_blob_client(self, blob_url: str, **kwargs) -> "AzStorageTorchBlobClient":
+        start = time.time()
+        blob_client = self._get_blob_client(blob_url, **kwargs)
+        print(f"get_blob_client took {time.time() - start} seconds")
+        return blob_client
+
+    def _get_blob_client(self, blob_url: str, **kwargs) -> "AzStorageTorchBlobClient":
+        if kwargs.get("cached", False):
+            return self._get_blob_client_cached(blob_url)
+        if kwargs.get("cached_sdk_client", False):
+            return self._get_blob_client_cached_sdk_client(blob_url)
+        if kwargs.get("cached_container_client", False):
+            return self._get_blob_client_cached_container_client(blob_url)
+        if kwargs.get("cached_transport", False):
+            return self._get_blob_client_cached_transport(blob_url)
+        if kwargs.get("cached_pipeline", False):
+            return self._get_blob_client_cached_pipeline(blob_url)
+        if kwargs.get("cached_blob_properties", False):
+            return self._get_blob_client_cached_blob_properties(blob_url)
+        return self._get_azstoragetorch_blob_client_from_url(blob_url)
+    
+    def _get_blob_client_cached(self, blob_url: str):
+        if self._client is None:
+            self._client = self._get_azstoragetorch_blob_client_from_url(blob_url)
+            self._client.close = lambda: None  # To not close executor
+        return self._client
+    
+    def _get_blob_client_cached_sdk_client(self, blob_url: str):
+        if self._sdk_client is None:
+            self._sdk_client = self._get_sdk_blob_client_from_url(blob_url)
+        return AzStorageTorchBlobClient(self._sdk_client)
+    
+    def _get_blob_client_cached_container_client(self, blob_url: str):
+        if self._sdk_container_client is None:
+            self._sdk_container_client = self._get_sdk_container_client_from_url(blob_url)
+        blob_name = blob_url[len(self._sdk_container_client.url) + 1 :]
+        blob_client = self._sdk_container_client.get_blob_client(blob_name)
+        return AzStorageTorchBlobClient(blob_client)
+
+    def _get_blob_client_cached_transport(self, blob_url: str):
+        if self._transport is None:
+            # self._transport = TransportWrapper(RequestsTransport(connection_timeout=20, read_timeout=60))
+            self._transport = RequestsTransport(connection_timeout=20, read_timeout=60)
+        sdk_client = self._get_sdk_blob_client_from_url(blob_url, transport=self._transport)
+        return AzStorageTorchBlobClient(sdk_client)
+    
+    def _get_blob_client_cached_pipeline(self, blob_url: str):
+        if self._pipeline is None:
+            sdk_blob_client = self._get_sdk_blob_client_from_url(blob_url)
+            self._pipeline = sdk_blob_client._pipeline
+        sdk_blob_client = self._get_sdk_blob_client_from_url(blob_url, pipeline=self._pipeline)
+        return AzStorageTorchBlobClient(sdk_blob_client)
+    
+    def _get_blob_client_cached_blob_properties(self, blob_url: str):
+        if self._blob_properties is None:
+            client = self._get_azstoragetorch_blob_client_from_url(blob_url)
+            client.get_blob_size()
+            self._blob_properties = client._blob_properties
+            self._blob_url = blob_url
+
+        # if self._transport is None:
+        #     self._transport = RequestsTransport(connection_timeout=20, read_timeout=60)
+        # sdk_client = self._get_sdk_blob_client_from_url(self._blob_url, transport=self._transport)
+        # client = AzStorageTorchBlobClient(sdk_client)
+        client = self._get_azstoragetorch_blob_client_from_url(self._blob_url)
+        client._blob_properties = self._blob_properties
+        return client
+
+
+    def _get_azstoragetorch_blob_client_from_url(self, blob_url: str):
         return AzStorageTorchBlobClient.from_blob_url(
             blob_url, sdk_credential=self._sdk_credential
         )
     
+    def _get_sdk_blob_client_from_url(self, blob_url: str, transport=None, pipeline=None):
+        return azure.storage.blob.BlobClient.from_blob_url(
+            blob_url, credential=self._sdk_credential,
+            connection_data_block_size=AzStorageTorchBlobClient._CONNECTION_DATA_BLOCK_SIZE,
+            transport=transport,
+            _pipeline=pipeline,
+        )
+    
+    def _get_sdk_container_client_from_url(self, blob_url: str):
+        parsed = urllib.parse.urlparse(blob_url)
+        container_name = parsed.path.split("/")[1]
+        container_url = f"{parsed.scheme}://{parsed.netloc}/{container_name}"
+        return azure.storage.blob.ContainerClient.from_container_url(
+            container_url, credential=self._sdk_credential,
+            connection_data_block_size=AzStorageTorchBlobClient._CONNECTION_DATA_BLOCK_SIZE,
+        )
 
 
 class AzStorageTorchBlobClient:

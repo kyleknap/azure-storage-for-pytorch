@@ -31,6 +31,9 @@ def to_sdk_credential(
         return DefaultAzureCredential()
     if isinstance(credential, (AzureSasCredential, TokenCredential)):
         return credential
+    # Hack to not worry how to handle query string in uri
+    if isinstance(credential, str):
+        return credential
     raise TypeError(f"Unsupported credential: {type(credential)}")
 
 

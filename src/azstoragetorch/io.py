@@ -182,11 +182,12 @@ class BlobIO(io.IOBase):
         azstoragetorch_blob_client_factory: Optional[_client.AzStorageTorchBlobClientFactory] = None,
         blob_properties: Optional[azure.storage.blob.BlobProperties] = None,
     ) -> _client.AzStorageTorchBlobClient:
-        sdk_credential = _utils.to_sdk_credential(blob_url, credential)
         if azstoragetorch_blob_client_factory is None:
-            azstoragetorch_blob_client_factory = _client.AzStorageTorchBlobClientFactory()
+            print('better not be here')
+            sdk_credential = _utils.to_sdk_credential(blob_url, credential)
+            azstoragetorch_blob_client_factory = _client.AzStorageTorchBlobClientFactory(sdk_credential)
         return azstoragetorch_blob_client_factory.get_blob_client(
-            blob_url, sdk_credential, blob_properties=blob_properties
+            blob_url, blob_properties=blob_properties
         )
 
     def _readline(self, size: Optional[int]) -> bytes:

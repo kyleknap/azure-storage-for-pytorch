@@ -31,22 +31,22 @@ class BlobDataset(torch.utils.data.Dataset):
         self._transform = transform
 
     @classmethod
-    def from_container_url(cls, container_url: str, *, name_starts_with: Optional[str], credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None, list_type: str = "full"):
+    def from_container_url(cls, container_url: str, *, name_starts_with: Optional[str], credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None, list_type: str = "full", transform=None):
         sdk_credential = _utils.to_sdk_credential(container_url, credential)
         container_client = azure.storage.blob.ContainerClient.from_container_url(container_url, credential=sdk_credential)
         blob_client_factory = _AzStorageTorchBlobClientFactory(sdk_credential)
         if list_type == "full":
             blobs = [
-                Blob(f"{container_url/blob.name}", blob_client_factory) for blob in container_client.list_blobs(name_starts_with=name_starts_with)
+                Blob(f"{container_url}/{blob.name}", blob_client_factory) for blob in container_client.list_blobs(name_starts_with=name_starts_with)
             ]
         elif list_type == "name":
             blobs = [
-                Blob(f"{container_url/blob_name}", blob_client_factory) for blob_name in container_client.list_blob_names(name_starts_with=name_starts_with)
+                Blob(f"{container_url}/{blob_name}", blob_client_factory) for blob_name in container_client.list_blob_names(name_starts_with=name_starts_with)
             ]
-        return cls(blobs)
+        return cls(blobs, transform=transform)
     
     @classmethod
-    def from_blob_urls(cls, blob_urls: list[str], *, credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None):
+    def from_blob_urls(cls, blob_urls: list[str], *, credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None, transform=None):
         # TODO: Need to figure out if we want to override the credential per url. probably should...
         # TODO: Need to figure out how we share transports across blobs especially if they are not same account or container
         sdk_credential = _utils.to_sdk_credential(blob_urls[0], credential)
@@ -54,7 +54,7 @@ class BlobDataset(torch.utils.data.Dataset):
         blobs = [
             Blob(url, blob_client_factory) for url in blob_urls
         ]
-        return cls(blobs)
+        return cls(blobs, transform=transform)
     
     def __getitem__(self, index):
         blob = self._blobs[index]
