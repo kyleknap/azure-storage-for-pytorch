@@ -9,10 +9,7 @@ import io
 import os
 from typing import get_args, Optional, Literal, List
 
-import azure.storage.blob
-
 from azstoragetorch import _client
-from azstoragetorch import _utils
 from azstoragetorch.exceptions import FatalBlobIOWriteError
 
 
@@ -29,7 +26,7 @@ class BlobIO(io.IOBase):
         blob_url: str,
         mode: _SUPPORTED_MODES,
         *,
-        credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         **_internal_only_kwargs,
     ):
         self._blob_url = blob_url
@@ -38,8 +35,7 @@ class BlobIO(io.IOBase):
         self._client = self._get_azstoragetorch_blob_client(
             blob_url,
             credential,
-            _internal_only_kwargs.get("azstoragetorch_blob_client_factory"),
-            _internal_only_kwargs.get("blob_properties"),
+            _internal_only_kwargs.get("azstoragetorch_blob_client"),
         )
 
         self._position = 0
@@ -49,7 +45,9 @@ class BlobIO(io.IOBase):
         self._readline_buffer = b""
         self._write_buffer = bytearray()
         self._all_stage_block_futures: List[_client.STAGE_BLOCK_FUTURE_TYPE] = []
-        self._in_progress_stage_block_futures: List[_client.STAGE_BLOCK_FUTURE_TYPE] = []
+        self._in_progress_stage_block_futures: List[
+            _client.STAGE_BLOCK_FUTURE_TYPE
+        ] = []
         self._stage_block_exception: Optional[BaseException] = None
 
     def close(self) -> None:
@@ -142,7 +140,9 @@ class BlobIO(io.IOBase):
                 f"{param_name} must be greater than or equal to {min_value}"
             )
 
-    def _validate_supported_write_type(self, b: _client.SUPPORTED_WRITE_BYTES_LIKE_TYPE) -> None:
+    def _validate_supported_write_type(
+        self, b: _client.SUPPORTED_WRITE_BYTES_LIKE_TYPE
+    ) -> None:
         if not isinstance(b, get_args(_client.SUPPORTED_WRITE_BYTES_LIKE_TYPE)):
             raise TypeError(
                 f"Unsupported type for write: {type(b)}. Supported types: {get_args(_client.SUPPORTED_WRITE_BYTES_LIKE_TYPE)}"
@@ -178,17 +178,15 @@ class BlobIO(io.IOBase):
     def _get_azstoragetorch_blob_client(
         self,
         blob_url: str,
-        credential: _utils.AZSTORAGETORCH_CREDENTIAL_TYPE,
-        azstoragetorch_blob_client_factory: Optional[_client.AzStorageTorchBlobClientFactory] = None,
-        blob_properties: Optional[azure.storage.blob.BlobProperties] = None,
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE,
+        azstoragetorch_blob_client: Optional[_client.AzStorageTorchBlobClient] = None,
     ) -> _client.AzStorageTorchBlobClient:
-        if azstoragetorch_blob_client_factory is None:
-            print('better not be here')
-            sdk_credential = _utils.to_sdk_credential(blob_url, credential)
-            azstoragetorch_blob_client_factory = _client.AzStorageTorchBlobClientFactory(sdk_credential)
-        return azstoragetorch_blob_client_factory.get_blob_client(
-            blob_url, blob_properties=blob_properties
+        if azstoragetorch_blob_client is not None:
+            return azstoragetorch_blob_client
+        blob_client_factory = _client.AzStorageTorchBlobClientFactory(
+            credential=credential
         )
+        return blob_client_factory.get_blob_client_from_url(blob_url)
 
     def _readline(self, size: Optional[int]) -> bytes:
         consumed = b""
