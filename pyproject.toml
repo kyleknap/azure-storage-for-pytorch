@@ -39,6 +39,8 @@ dev = [
     "build",
     "check-manifest",
     "pytest",
+    "sphinx",
+    "furo",
 ]
 
 [project.urls]
