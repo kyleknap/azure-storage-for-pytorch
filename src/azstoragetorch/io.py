@@ -83,6 +83,9 @@ class BlobIO(io.IOBase):
 
     @property
     def closed(self) -> bool:
+        """
+        Return whether the IO object is closed.
+        """
         return self._closed
 
     def fileno(self) -> int:
@@ -94,7 +97,7 @@ class BlobIO(io.IOBase):
 
     def read(self, size: Optional[int] = -1, /) -> bytes:
         """
-        Read bytes from the blob to the buffer.
+        Read bytes from the blob.
         """
 
         if size is not None:
@@ -165,7 +168,7 @@ class BlobIO(io.IOBase):
 
     def write(self, b: _SUPPORTED_WRITE_TYPES, /) -> int:
         """
-        Write bytes to the blob from the buffer.
+        Writes a bytes-like object to the blob and returns the number of bytes written.
         """
 
         self._validate_supported_write_type(b)
