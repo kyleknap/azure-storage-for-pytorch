@@ -52,13 +52,17 @@ class AzStorageTorchBlobClientFactory:
         self,
         account_url: Optional[str] = None,
         credential: AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        list_type: str = "name",
+        proxy_blob_properties: bool = False
     ):
         self._account_url = account_url
         self._sdk_credential = self._get_sdk_credential(credential)
         self._transport = self._get_transport()
+        self._list_type = list_type
+        self._proxy_blob_properties = proxy_blob_properties
 
     def get_blob_client_from_url(self, blob_url: str) -> "AzStorageTorchBlobClient":
-        self._validate_url_matches_account(blob_url)
+        #self._validate_url_matches_account(blob_url)
         blob_sdk_client = self._get_sdk_blob_client_from_url(blob_url)
         return AzStorageTorchBlobClient(blob_sdk_client)
 
@@ -67,12 +71,23 @@ class AzStorageTorchBlobClientFactory:
     ) -> list["AzStorageTorchBlobClient"]:
         self._validate_url_matches_account(container_url)
         container_client = self._get_sdk_container_client_from_url(container_url)
-        return [
-            AzStorageTorchBlobClient(container_client.get_blob_client(blob_name))
-            for blob_name in container_client.list_blob_names(
-                name_starts_with=name_starts_with
-            )
-        ]
+        if self._list_type == "name":
+            print("by name")
+            return [
+                AzStorageTorchBlobClient(container_client.get_blob_client(blob_name))
+                for blob_name in container_client.list_blob_names(name_starts_with=name_starts_with)
+            ]
+        else:
+            if self._proxy_blob_properties:
+                print("by full blob, providing blob properties")
+                return [
+                    AzStorageTorchBlobClient(container_client.get_blob_client(blob.name), blob_properties=blob)
+                    for blob in container_client.list_blobs(name_starts_with=name_starts_with)                ]
+            print("by full blob, not providing blob properties")
+            return [
+                AzStorageTorchBlobClient(container_client.get_blob_client(blob.name))
+                for blob in container_client.list_blobs(name_starts_with=name_starts_with)
+            ]
 
     @functools.cached_property
     def _shared_pipeline(self) -> Optional[Pipeline]:
@@ -165,6 +180,7 @@ class AzStorageTorchBlobClient:
         sdk_blob_client: azure.storage.blob.BlobClient,
         executor: Optional[concurrent.futures.Executor] = None,
         max_in_flight_requests: Optional[int] = None,
+        blob_properties: Optional[azure.storage.blob.BlobProperties] = None,
     ):
         self._sdk_blob_client = sdk_blob_client
         self._generated_sdk_storage_client = self._sdk_blob_client._client
@@ -179,6 +195,7 @@ class AzStorageTorchBlobClient:
         # buffer data into memory for uploads as is prevents large amounts of memory from being
         # submitted to the executor when there are no workers available to upload it.
         self._max_in_flight_semaphore = threading.Semaphore(max_in_flight_requests)
+        self._provided_blob_properties = blob_properties
 
     @classmethod
     def from_blob_url(
@@ -237,6 +254,8 @@ class AzStorageTorchBlobClient:
 
     @functools.cached_property
     def _blob_properties(self) -> azure.storage.blob.BlobProperties:
+        if self._provided_blob_properties is not None:
+            return self._provided_blob_properties
         return self._sdk_blob_client.get_blob_properties()
 
     def _update_download_length_from_blob_size(

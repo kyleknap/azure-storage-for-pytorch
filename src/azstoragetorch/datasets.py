@@ -34,8 +34,9 @@ class BlobDataset(torch.utils.data.Dataset):
         *,
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         transform=None,
+        **blob_factory_kwargs,
     ):
-        blob_client_factory = cls._get_blob_client_factory(blob_urls[0], credential)
+        blob_client_factory = cls._get_blob_client_factory(blob_urls[0], credential, **blob_factory_kwargs)
         blobs = [
             Blob(blob_client_factory.get_blob_client_from_url(blob_url))
             for blob_url in blob_urls
@@ -50,8 +51,9 @@ class BlobDataset(torch.utils.data.Dataset):
         name_starts_with: Optional[str],
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         transform=None,
+        **blob_factory_kwargs,
     ):
-        blob_client_factory = cls._get_blob_client_factory(container_url, credential)
+        blob_client_factory = cls._get_blob_client_factory(container_url, credential, **blob_factory_kwargs)
         blobs = [
             Blob(blob_client)
             for blob_client in blob_client_factory.get_blob_clients_from_container_url(
@@ -71,12 +73,16 @@ class BlobDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def _get_blob_client_factory(
-        resource_url: str, credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE
+        resource_url: str, credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE,
+        list_type: str = "name",
+        proxy_blob_properties: bool = False,
     ) -> _client.AzStorageTorchBlobClientFactory:
         parsed_url = urllib.parse.urlparse(resource_url)
         account_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
         return _client.AzStorageTorchBlobClientFactory(
-            account_url=account_url, credential=credential
+            account_url=account_url, credential=credential,
+            list_type=list_type,
+            proxy_blob_properties=proxy_blob_properties,
         )
 
 
