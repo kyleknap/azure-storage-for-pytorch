@@ -13,17 +13,21 @@ import os
 import random
 import threading
 import time
+import urllib.parse
 import uuid
-from typing import Optional, List, Tuple, Iterator, Union, Type
+from typing import Optional, List, Tuple, Iterator, Union, Literal
 
 from azure.core.credentials import (
     AzureSasCredential,
     TokenCredential,
 )
 import azure.core.exceptions
+from azure.identity import DefaultAzureCredential
 import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
+from azure.core.pipeline.transport import RequestsTransport
+
 from azstoragetorch._version import __version__
 
 
@@ -35,12 +39,74 @@ SDK_CREDENTIAL_TYPE = Optional[
         TokenCredential,
     ]
 ]
+AZSTORAGETORCH_CREDENTIAL_TYPE = Union[SDK_CREDENTIAL_TYPE, Literal[False]]
 SUPPORTED_WRITE_BYTES_LIKE_TYPE = Union[bytes, bytearray, memoryview]
 STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future[str]
 
 
-class AzStorageTorchBlobClient:
+class AzStorageTorchBlobClientFactory:
+    # Socket timeouts set to match the default timeouts in Python SDK
+    _SOCKET_CONNECTION_TIMEOUT = 20
+    _SOCKET_READ_TIMEOUT = 60
     _CONNECTION_DATA_BLOCK_SIZE = 256 * 1024
+
+    def __init__(
+        self,
+        credential: AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+    ):
+        self._sdk_credential = self._get_sdk_credential(credential)
+        self._transport = self._get_transport()
+
+    def get_blob_client_from_url(self, blob_url: str) -> "AzStorageTorchBlobClient":
+        blob_sdk_client = self._get_sdk_blob_client_from_url(blob_url)
+        return AzStorageTorchBlobClient(blob_sdk_client)
+
+    def _get_sdk_credential(
+        self, credential: AZSTORAGETORCH_CREDENTIAL_TYPE
+    ) -> SDK_CREDENTIAL_TYPE:
+        if credential is False:
+            return None
+        if credential is None:
+            return DefaultAzureCredential()
+        if isinstance(credential, (AzureSasCredential, TokenCredential)):
+            return credential
+        raise TypeError(f"Unsupported credential: {type(credential)}")
+
+    def _get_transport(self) -> RequestsTransport:
+        return RequestsTransport(
+            connection_timeout=self._SOCKET_CONNECTION_TIMEOUT,
+            read_timeout=self._SOCKET_READ_TIMEOUT,
+        )
+
+    def _get_sdk_blob_client_from_url(self, blob_url: str) -> azure.storage.blob.BlobClient:
+        kwargs = {
+            "connection_data_block_size": self._CONNECTION_DATA_BLOCK_SIZE,
+            "transport": self._transport,
+            "user_agent": f"azstoragetorch/{__version__}",
+        }
+        credential = self._sdk_credential
+        if self._url_has_sas_token(blob_url):
+            # The SDK prefers the explict credential over the one in the URL. So if a SAS token is
+            # in the URL, we do not want the factory to automatically inject its credential, especially
+            # if it would have been the default credential.
+            credential = None
+        kwargs["credential"] = credential
+        return azure.storage.blob.BlobClient.from_blob_url(
+            blob_url,
+            **kwargs,
+        )
+
+    def _url_has_sas_token(self, resource_url: str) -> bool:
+        parsed_url = urllib.parse.urlparse(resource_url)
+        if parsed_url.query is None:
+            return False
+        parsed_qs = urllib.parse.parse_qs(parsed_url.query)
+        # The signature is always required in a valid SAS token. So look for the "sig"
+        # key to determine if the URL has a SAS token.
+        return "sig" in parsed_qs
+
+
+class AzStorageTorchBlobClient:
     _PARTITIONED_DOWNLOAD_THRESHOLD = 16 * 1024 * 1024
     _PARTITION_SIZE = 16 * 1024 * 1024
     _NUM_DOWNLOAD_ATTEMPTS = 3
@@ -59,7 +125,7 @@ class AzStorageTorchBlobClient:
     ):
         self._sdk_blob_client = sdk_blob_client
         self._generated_sdk_storage_client = self._sdk_blob_client._client
-        
+
         if max_in_flight_requests is None:
             max_in_flight_requests = self._get_max_in_flight_requests()
         if executor is None:
@@ -71,18 +137,6 @@ class AzStorageTorchBlobClient:
         # buffer data into memory for uploads as is prevents large amounts of memory from being
         # submitted to the executor when there are no workers available to upload it.
         self._max_in_flight_semaphore = threading.Semaphore(max_in_flight_requests)
-
-    @classmethod
-    def from_blob_url(
-        cls, blob_url: str, sdk_credential: SDK_CREDENTIAL_TYPE
-    ) -> "AzStorageTorchBlobClient":
-        sdk_blob_client = azure.storage.blob.BlobClient.from_blob_url(
-            blob_url,
-            credential=sdk_credential,
-            connection_data_block_size=cls._CONNECTION_DATA_BLOCK_SIZE,
-            user_agent=f"azstoragetorch/{__version__}",
-        )
-        return AzStorageTorchBlobClient(sdk_blob_client)
 
     def get_blob_size(self) -> int:
         return self._blob_properties.size

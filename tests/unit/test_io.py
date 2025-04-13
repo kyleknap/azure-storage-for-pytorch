@@ -12,7 +12,7 @@ import string
 from unittest import mock
 import pytest
 
-from azure.core.credentials import AzureSasCredential, AzureNamedKeyCredential
+from azure.core.credentials import AzureSasCredential
 from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 
@@ -27,14 +27,8 @@ EXPECTED_FLUSH_THRESHOLD = 32 * 1024 * 1024
 
 
 @pytest.fixture
-def sas_token():
-    return "sp=r&st=2024-10-28T20:22:30Z&se=2024-10-29T04:22:30Z&spr=https&sv=2022-11-02&sr=c&sig=signature"
-
-
-@pytest.fixture
 def mock_azstoragetorch_blob_client(blob_content, blob_length):
     mock_blob_client = mock.Mock(AzStorageTorchBlobClient)
-    mock_blob_client.from_blob_url.return_value = mock_blob_client
     mock_blob_client.get_blob_size.return_value = blob_length
     mock_blob_client.download.return_value = blob_content
     mock_blob_client.stage_blocks.return_value = []
@@ -47,7 +41,7 @@ def create_blob_io(blob_url, mock_azstoragetorch_blob_client):
         return BlobIO(
             url,
             mode=mode,
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
+            _azstoragetorch_blob_client=mock_azstoragetorch_blob_client,
         )
 
     return _create_blob_io
@@ -94,91 +88,24 @@ def add_stage_blocks_results(mock_azstoragetorch_blob_client, *stage_blocks_resu
 
 
 class TestBlobIO:
-    def test_credential_defaults_to_azure_default_credential(
-        self, blob_url, mock_azstoragetorch_blob_client
-    ):
-        BlobIO(
-            blob_url,
-            mode="rb",
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
-        )
-        mock_azstoragetorch_blob_client.from_blob_url.assert_called_once_with(
-            blob_url, mock.ANY
-        )
-        creds = mock_azstoragetorch_blob_client.from_blob_url.call_args[0][1]
-        assert isinstance(creds, DefaultAzureCredential)
-
     @pytest.mark.parametrize(
         "credential",
         [
+            None,
             DefaultAzureCredential(),
             AzureSasCredential("sas"),
+            False,
         ],
     )
-    def test_respects_user_provided_credential(
-        self, blob_url, mock_azstoragetorch_blob_client, credential
-    ):
-        BlobIO(
-            blob_url,
-            mode="rb",
-            credential=credential,
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
-        )
-        mock_azstoragetorch_blob_client.from_blob_url.assert_called_once_with(
-            blob_url, credential
-        )
-
-    def test_anonymous_credential(self, blob_url, mock_azstoragetorch_blob_client):
-        BlobIO(
-            blob_url,
-            mode="rb",
-            credential=False,
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
-        )
-        mock_azstoragetorch_blob_client.from_blob_url.assert_called_once_with(
-            blob_url, None
-        )
-
-    def test_detects_sas_token_in_blob_url(
-        self, blob_url, mock_azstoragetorch_blob_client, sas_token
-    ):
-        BlobIO(
-            blob_url + "?" + sas_token,
-            mode="rb",
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
-        )
-        # The SDK prefers the explict credential over the one in the URL. So if a SAS token is
-        # in the URL, we do not want it automatically injecting the DefaultAzureCredential.
-        mock_azstoragetorch_blob_client.from_blob_url.assert_called_once_with(
-            blob_url + "?" + sas_token, None
-        )
-
-    def test_credential_defaults_to_azure_default_credential_for_snapshot_url(
-        self, blob_url, mock_azstoragetorch_blob_client
-    ):
-        snapshot_url = f"{blob_url}?snapshot=2024-10-28T20:34:36.1724588Z"
-        BlobIO(
-            snapshot_url,
-            mode="rb",
-            azstoragetorch_blob_client_cls=mock_azstoragetorch_blob_client,
-        )
-        mock_azstoragetorch_blob_client.from_blob_url.assert_called_once_with(
-            snapshot_url, mock.ANY
-        )
-        creds = mock_azstoragetorch_blob_client.from_blob_url.call_args[0][1]
-        assert isinstance(creds, DefaultAzureCredential)
-
-    @pytest.mark.parametrize(
-        "credential",
-        [
-            "key",
-            {"account_name": "name", "account_key": "key"},
-            AzureNamedKeyCredential("name", "key"),
-        ],
-    )
-    def test_raises_for_unsupported_credential(self, blob_url, credential):
-        with pytest.raises(TypeError, match="Unsupported credential"):
-            BlobIO(blob_url, mode="rb", credential=credential)
+    def test_proxies_credential_to_blob_client_factory(self, blob_url, credential):
+        with mock.patch(
+            "azstoragetorch._client.AzStorageTorchBlobClientFactory", spec=True
+        ) as mock_factory:
+            BlobIO(blob_url, "rb", credential=credential)
+            mock_factory.assert_called_with(credential=credential)
+            mock_factory.return_value.get_blob_client_from_url.assert_called_once_with(
+                blob_url
+            )
 
     @pytest.mark.parametrize(
         "unsupported_mode",
