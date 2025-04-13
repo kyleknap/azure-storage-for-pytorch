@@ -15,12 +15,15 @@ import threading
 import time
 import uuid
 import urllib.parse
-from typing import Optional, List, Tuple, Iterator, Union, Literal
+from typing import Optional, List, Tuple, Iterator, Union, Literal, Any
 
 import azure.core.exceptions
 from azure.core.credentials import (
     AzureSasCredential,
     TokenCredential,
+    AccessToken,
+    AccessTokenInfo,
+    TokenRequestOptions,
 )
 from azure.identity import DefaultAzureCredential
 import azure.storage.blob
@@ -41,6 +44,39 @@ SDK_CREDENTIAL_TYPE = Optional[
 AZSTORAGETORCH_CREDENTIAL_TYPE = Union[SDK_CREDENTIAL_TYPE, Literal[False]]
 SUPPORTED_WRITE_BYTES_LIKE_TYPE = Union[bytes, bytearray, memoryview]
 STAGE_BLOCK_FUTURE_TYPE = concurrent.futures.Future[str]
+
+
+class CachedTokenCredential:
+    def __init__(self, underlying_credential: TokenCredential) -> None:
+        self._underlying_credential = underlying_credential
+        self._token: Optional[Union[AccessToken, AccessTokenInfo]] = None
+    
+    def get_token(self, *scopes: str, **kwargs) -> AccessToken:
+        if self._needs_new_token():
+            self._token = self._underlying_credential.get_token(*scopes, **kwargs)
+        return self._token
+    
+    def _needs_new_token(self) -> bool:
+        now = time.time()
+        refresh_on = getattr(self._token, "refresh_on", None)
+        return not self._token or (refresh_on and refresh_on <= now) or self._token.expires_on - now < 300
+
+
+class CachedTokenInfoCredential(CachedTokenCredential):
+    def __enter__(self) -> "CachedTokenInfoCredential":
+        self._underlying_credential.__enter__()  # type: ignore
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self._underlying_credential.__exit__(*args)  # type: ignore
+
+    def close(self) -> None:
+        self.__exit__()
+
+    def get_token_info(self, *scopes: str, options: Optional[TokenRequestOptions] = None) -> AccessTokenInfo:
+        if self._needs_new_token():
+            self._token = self._underlying_credential.get_token_info(*scopes, options=options)
+        return self._token
 
 
 class AzStorageTorchBlobClientFactory:
@@ -67,26 +103,26 @@ class AzStorageTorchBlobClientFactory:
         return AzStorageTorchBlobClient(blob_sdk_client)
 
     def get_blob_clients_from_container_url(
-        self, container_url: str, name_starts_with: Optional[str] = None
+        self, container_url: str, prefix: Optional[str] = None
     ) -> list["AzStorageTorchBlobClient"]:
-        self._validate_url_matches_account(container_url)
+        # self._validate_url_matches_account(container_url)
         container_client = self._get_sdk_container_client_from_url(container_url)
         if self._list_type == "name":
             print("by name")
             return [
                 AzStorageTorchBlobClient(container_client.get_blob_client(blob_name))
-                for blob_name in container_client.list_blob_names(name_starts_with=name_starts_with)
+                for blob_name in container_client.list_blob_names(name_starts_with=prefix)
             ]
         else:
             if self._proxy_blob_properties:
                 print("by full blob, providing blob properties")
                 return [
                     AzStorageTorchBlobClient(container_client.get_blob_client(blob.name), blob_properties=blob)
-                    for blob in container_client.list_blobs(name_starts_with=name_starts_with)                ]
+                    for blob in container_client.list_blobs(name_starts_with=prefix)                ]
             print("by full blob, not providing blob properties")
             return [
                 AzStorageTorchBlobClient(container_client.get_blob_client(blob.name))
-                for blob in container_client.list_blobs(name_starts_with=name_starts_with)
+                for blob in container_client.list_blobs(name_starts_with=prefix)
             ]
 
     @functools.cached_property
@@ -108,6 +144,16 @@ class AzStorageTorchBlobClientFactory:
     def _get_sdk_credential(
         self, credential: AZSTORAGETORCH_CREDENTIAL_TYPE
     ) -> SDK_CREDENTIAL_TYPE:
+        sdk_credential = self._map_to_sdk_credential(credential)
+        if hasattr(sdk_credential, "get_token_info"):
+            return CachedTokenInfoCredential(sdk_credential)
+        elif isinstance(sdk_credential, TokenCredential):
+            return CachedTokenCredential(sdk_credential)
+        return sdk_credential
+    
+    def _map_to_sdk_credential(
+        self, credential: AZSTORAGETORCH_CREDENTIAL_TYPE
+    ) -> SDK_CREDENTIAL_TYPE:
         if credential is False:
             return None
         if credential is None:
@@ -115,7 +161,7 @@ class AzStorageTorchBlobClientFactory:
         if isinstance(credential, (AzureSasCredential, TokenCredential)):
             return credential
         raise TypeError(f"Unsupported credential: {type(credential)}")
-
+    
     def _get_transport(self) -> RequestsTransport:
         return RequestsTransport(
             connection_timeout=self._SOCKET_CONNECTION_TIMEOUT,
@@ -207,6 +253,10 @@ class AzStorageTorchBlobClient:
             connection_data_block_size=cls._CONNECTION_DATA_BLOCK_SIZE,
         )
         return AzStorageTorchBlobClient(sdk_blob_client)
+
+    @property
+    def blob_name(self) -> str:
+        return self._sdk_blob_client.blob_name
 
     def get_blob_size(self) -> int:
         return self._blob_properties.size

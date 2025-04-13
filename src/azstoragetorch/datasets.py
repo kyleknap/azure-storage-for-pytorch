@@ -6,7 +6,7 @@
 
 import dataclasses
 import urllib.parse
-from typing import Optional
+from typing import Optional, Iterable, Any, Callable
 
 import torch.utils.data
 
@@ -14,9 +14,26 @@ from azstoragetorch.io import BlobIO
 from azstoragetorch import _client
 
 
+_TRANSFORM_TYPE = Optional[Callable["Blob", Any]]
+ 
+
+def _default_transform(blob: "Blob") -> dict[str, Any]:
+    ret = {
+        "blob_name": blob.blob_name,
+    }
+    with blob.stream() as f:
+        ret["data"] = f.read()
+    return ret
+
+
+
 @dataclasses.dataclass
 class Blob:
     _blob_client: _client.AzStorageTorchBlobClient
+
+    @property
+    def blob_name(self) -> str:
+        return self._blob_client.blob_name
 
     def stream(self) -> BlobIO:
         return BlobIO("placeholder", "rb", azstoragetorch_blob_client=self._blob_client)
@@ -25,15 +42,17 @@ class Blob:
 class BlobDataset(torch.utils.data.Dataset):
     def __init__(self, blobs: list[Blob], transform=None):
         self._blobs = blobs
+        if transform is None:
+            transform = _default_transform
         self._transform = transform
 
     @classmethod
     def from_blob_urls(
         cls,
-        blob_urls: list[str],
+        blob_urls: Iterable[str],
         *,
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
-        transform=None,
+        transform: _TRANSFORM_TYPE = None,
         **blob_factory_kwargs,
     ):
         blob_client_factory = cls._get_blob_client_factory(blob_urls[0], credential, **blob_factory_kwargs)
@@ -48,16 +67,16 @@ class BlobDataset(torch.utils.data.Dataset):
         cls,
         container_url: str,
         *,
-        name_starts_with: Optional[str],
+        prefix: Optional[str] = None,
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
-        transform=None,
+        transform: _TRANSFORM_TYPE = None,
         **blob_factory_kwargs,
     ):
         blob_client_factory = cls._get_blob_client_factory(container_url, credential, **blob_factory_kwargs)
         blobs = [
             Blob(blob_client)
             for blob_client in blob_client_factory.get_blob_clients_from_container_url(
-                container_url, name_starts_with=name_starts_with
+                container_url, prefix=prefix
             )
         ]
         return cls(blobs, transform=transform)
@@ -76,9 +95,12 @@ class BlobDataset(torch.utils.data.Dataset):
         resource_url: str, credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE,
         list_type: str = "name",
         proxy_blob_properties: bool = False,
+        share_pipeline: bool = True,
     ) -> _client.AzStorageTorchBlobClientFactory:
-        parsed_url = urllib.parse.urlparse(resource_url)
-        account_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        account_url = None
+        if share_pipeline:
+            parsed_url = urllib.parse.urlparse(resource_url)
+            account_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
         return _client.AzStorageTorchBlobClientFactory(
             account_url=account_url, credential=credential,
             list_type=list_type,
