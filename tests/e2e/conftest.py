@@ -22,11 +22,25 @@ def account_url():
 
 
 @pytest.fixture(scope="package")
-def container_client(account_url):
+def blob_service_client(account_url):
     blob_service_client = BlobServiceClient(
         account_url, credential=DefaultAzureCredential()
     )
-    container_name = random_resource_name()
-    container = blob_service_client.create_container(name=container_name)
+    return blob_service_client
+
+
+@pytest.fixture(scope="package")
+def create_container(blob_service_client):
+    def _create_container(container_name=None):
+        if container_name is None:
+            container_name = random_resource_name()
+        container_client = blob_service_client.create_container(name=container_name)
+        return container_client
+    return _create_container
+
+
+@pytest.fixture(scope="package")
+def container_client(create_container):
+    container = create_container()
     yield container
     container.delete_container()
