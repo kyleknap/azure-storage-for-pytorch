@@ -2,3 +2,5 @@
 * text=auto
 
 Makefile text eol=lf
+requirements-dev.txt text eol=lf
+uv.lock text eol=lf

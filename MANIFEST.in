@@ -2,3 +2,5 @@ include SECURITY.md
 include requirements-dev.txt
 recursive-include tests *.py
 recursive-include doc *
+
+exclude uv.lock
