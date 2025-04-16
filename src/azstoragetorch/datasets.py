@@ -4,7 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Optional, Union, TypeVar, TypedDict
 
 import torch.utils.data
@@ -55,8 +55,10 @@ class Blob:
 
 
 class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
-    def __init__(self, blobs: list[Blob], transform: _TRANSFORM_TYPE = _default_transform):
-        self._blobs = blobs
+    def __init__(
+        self, blobs: Iterable[Blob], transform: _TRANSFORM_TYPE = _default_transform
+    ):
+        self._blobs = list(blobs)
         self._transform = transform
 
     @classmethod
@@ -67,15 +69,7 @@ class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         transform: _TRANSFORM_TYPE = _default_transform,
     ) -> "BlobDataset":
-        if isinstance(blob_urls, str):
-            blob_urls = [blob_urls]
-        blob_client_factory = _client.AzStorageTorchBlobClientFactory(
-            credential=credential
-        )
-        blobs = [
-            Blob(blob_client_factory.get_blob_client_from_url(blob_url))
-            for blob_url in blob_urls
-        ]
+        blobs = _BlobUrlsBlobIterable(blob_urls, credential=credential)
         return cls(blobs, transform=transform)
 
     @classmethod
@@ -87,15 +81,9 @@ class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
         credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
         transform: _TRANSFORM_TYPE = _default_transform,
     ) -> "BlobDataset":
-        blob_client_factory = _client.AzStorageTorchBlobClientFactory(
-            credential=credential
+        blobs = _ContainerUrlBlobIterable(
+            container_url, prefix=prefix, credential=credential
         )
-        blobs = [
-            Blob(blob_client)
-            for blob_client in blob_client_factory.yield_blob_clients_from_container_url(
-                container_url, prefix=prefix
-            )
-        ]
         return cls(blobs, transform=transform)
 
     def __getitem__(self, index: int) -> _TransformOutputType_co:
@@ -104,3 +92,93 @@ class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
 
     def __len__(self) -> int:
         return len(self._blobs)
+
+
+class IterableBlobDataset(torch.utils.data.IterableDataset[_TransformOutputType_co]):
+    def __init__(
+        self, blobs: Iterable[Blob], transform: _TRANSFORM_TYPE = _default_transform
+    ):
+        self._blobs = blobs
+        self._transform = transform
+
+    @classmethod
+    def from_blob_urls(
+        cls,
+        blob_urls: Union[str, Iterable[str]],
+        *,
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        transform: _TRANSFORM_TYPE = _default_transform,
+    ) -> "BlobDataset":
+        blobs = _BlobUrlsBlobIterable(blob_urls, credential=credential)
+        return cls(blobs, transform=transform)
+
+    @classmethod
+    def from_container_url(
+        cls,
+        container_url: str,
+        *,
+        prefix: Optional[str] = None,
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+        transform: _TRANSFORM_TYPE = _default_transform,
+    ) -> "BlobDataset":
+        blobs = _ContainerUrlBlobIterable(
+            container_url, prefix=prefix, credential=credential
+        )
+        return cls(blobs, transform=transform)
+
+    def __iter__(self) -> Iterable[_TransformOutputType_co]:
+        worker_info = torch.utils.data.get_worker_info()
+        for i, blob in enumerate(self._blobs):
+            if self._should_yield_from_worker_shard(worker_info, i):
+                yield self._transform(blob)
+
+    def _should_yield_from_worker_shard(self, worker_info, blob_index: int) -> bool:
+        if worker_info is None:
+            return True
+        return blob_index % worker_info.num_workers == worker_info.id
+
+
+class _BaseBlobIterable(Iterable[Blob]):
+    def __init__(self, credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None):
+        self._credential = credential
+        self._blob_client_factory = _client.AzStorageTorchBlobClientFactory(
+            credential=self._credential
+        )
+
+    def __iter__(self) -> Iterator[Blob]:
+        raise NotImplementedError("__iter__")
+
+
+class _ContainerUrlBlobIterable(_BaseBlobIterable):
+    def __init__(
+        self,
+        container_url: str,
+        prefix: Optional[str] = None,
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+    ):
+        super().__init__(credential)
+        self._container_url = container_url
+        self._prefix = prefix
+
+    def __iter__(self) -> Iterator[Blob]:
+        blob_clients = self._blob_client_factory.yield_blob_clients_from_container_url(
+            self._container_url, prefix=self._prefix
+        )
+        for blob_client in blob_clients:
+            yield Blob(blob_client)
+
+
+class _BlobUrlsBlobIterable(_BaseBlobIterable):
+    def __init__(
+        self,
+        blob_urls: Union[str, Iterable[str]],
+        credential: _client.AZSTORAGETORCH_CREDENTIAL_TYPE = None,
+    ):
+        super().__init__(credential)
+        if isinstance(blob_urls, str):
+            blob_urls = [blob_urls]
+        self._blob_urls = blob_urls
+
+    def __iter__(self) -> Iterator[Blob]:
+        for blob_url in self._blob_urls:
+            yield Blob(self._blob_client_factory.get_blob_client_from_url(blob_url))

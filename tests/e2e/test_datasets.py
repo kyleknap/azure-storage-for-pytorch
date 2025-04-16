@@ -11,7 +11,7 @@ from typing import Union, Any
 import pytest
 import torch.utils.data
 
-from azstoragetorch.datasets import BlobDataset
+from azstoragetorch.datasets import BlobDataset, IterableBlobDataset
 
 
 def generate_and_upload_data_samples(num_samples, container_client, blob_prefix=""):
@@ -113,79 +113,194 @@ class DatasetCase:
 
 
 @pytest.fixture(scope="module")
-def map_dataset_from_container_url_case(dataset_container, data_samples):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_container_url,
-        url=dataset_container.url,
-        expected_data_samples=data_samples,
-    )
+def create_dataset_case(data_samples):
+    def _create_dataset_case(
+        dataset_from_url_method,
+        url,
+        expected_data_samples=None,
+        dataset_from_url_kwargs=None,
+    ):
+        if expected_data_samples is None:
+            expected_data_samples = data_samples
+        if dataset_from_url_kwargs is None:
+            dataset_from_url_kwargs = {}
+        return DatasetCase(
+            dataset_from_url_method=dataset_from_url_method,
+            url=url,
+            expected_data_samples=expected_data_samples,
+            dataset_from_url_kwargs=dataset_from_url_kwargs,
+        )
+
+    return _create_dataset_case
+
+
+@pytest.fixture(scope="module")
+def create_from_container_url_dataset_case(dataset_container, create_dataset_case):
+    def _create_from_container_url_dataset_case(
+        dataset_cls, container=None, **create_dataset_case_kwargs
+    ):
+        if container is None:
+            container = dataset_container
+        return create_dataset_case(
+            dataset_cls.from_container_url,
+            url=container.url,
+            **create_dataset_case_kwargs,
+        )
+
+    return _create_from_container_url_dataset_case
+
+
+@pytest.fixture(scope="module")
+def create_from_blob_urls_dataset_case(create_dataset_case, data_samples):
+    def _create_from_blob_urls_dataset_case(
+        dataset_cls, url=None, **create_dataset_case_kwargs
+    ):
+        if url is None:
+            url = get_blob_urls(data_samples)
+        return create_dataset_case(
+            dataset_cls.from_blob_urls, url=url, **create_dataset_case_kwargs
+        )
+
+    return _create_from_blob_urls_dataset_case
+
+
+@pytest.fixture(scope="module")
+def prefix_case_kwargs(blob_prefix, prefixed_data_samples):
+    return {
+        "expected_data_samples": prefixed_data_samples,
+        "dataset_from_url_kwargs": {"prefix": blob_prefix},
+    }
+
+
+@pytest.fixture(scope="module")
+def transform_case_kwargs(dataset_container, data_samples):
+    return {
+        "expected_data_samples": get_blob_properties_only_data_samples(
+            data_samples,
+            dataset_container.container_name,
+        ),
+        "dataset_from_url_kwargs": {"transform": blob_properties_only_transform},
+    }
+
+
+@pytest.fixture(scope="module")
+def single_blob_url_case_kwargs(data_samples):
+    return {
+        "url": get_blob_urls(data_samples)[0],
+        "expected_data_samples": data_samples[:1],
+    }
+
+
+@pytest.fixture(scope="module")
+def different_containers_case_kwargs(data_samples, other_data_samples):
+    urls = get_blob_urls(data_samples) + get_blob_urls(other_data_samples)
+    return {
+        "url": urls,
+        "expected_data_samples": data_samples + other_data_samples,
+    }
+
+
+@pytest.fixture(scope="module")
+def map_dataset_from_container_url_case(create_from_container_url_dataset_case):
+    return create_from_container_url_dataset_case(BlobDataset)
 
 
 @pytest.fixture(scope="module")
 def map_dataset_from_container_url_with_prefix_case(
-    dataset_container, blob_prefix, prefixed_data_samples
+    create_from_container_url_dataset_case, prefix_case_kwargs
 ):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_container_url,
-        url=dataset_container.url,
-        expected_data_samples=prefixed_data_samples,
-        dataset_from_url_kwargs={"prefix": blob_prefix},
+    return create_from_container_url_dataset_case(BlobDataset, **prefix_case_kwargs)
+
+
+@pytest.fixture(scope="module")
+def map_dataset_from_container_url_with_transform_case(
+    create_from_container_url_dataset_case, transform_case_kwargs
+):
+    return create_from_container_url_dataset_case(BlobDataset, **transform_case_kwargs)
+
+
+@pytest.fixture(scope="module")
+def map_dataset_from_blob_urls_case(create_from_blob_urls_dataset_case):
+    return create_from_blob_urls_dataset_case(BlobDataset)
+
+
+@pytest.fixture(scope="module")
+def map_dataset_from_blob_urls_with_single_blob_url_case(
+    create_from_blob_urls_dataset_case, single_blob_url_case_kwargs
+):
+    return create_from_blob_urls_dataset_case(
+        BlobDataset, **single_blob_url_case_kwargs
     )
 
 
 @pytest.fixture(scope="module")
-def map_dataset_from_container_url_with_transform_case(dataset_container, data_samples):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_container_url,
-        url=dataset_container.url,
-        expected_data_samples=get_blob_properties_only_data_samples(
-            data_samples,
-            dataset_container.container_name,
-        ),
-        dataset_from_url_kwargs={"transform": blob_properties_only_transform},
-    )
-
-
-@pytest.fixture(scope="module")
-def map_dataset_from_blob_urls_case(data_samples):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_blob_urls,
-        url=get_blob_urls(data_samples),
-        expected_data_samples=data_samples,
-    )
-
-
-@pytest.fixture(scope="module")
-def map_dataset_from_blob_urls_with_single_blob_url_case(data_samples):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_blob_urls,
-        url=get_blob_urls(data_samples)[0],
-        expected_data_samples=data_samples[:1],
-    )
-
-
-@pytest.fixture(scope="module")
-def map_dataset_from_blob_urls_with_transform_case(dataset_container, data_samples):
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_blob_urls,
-        url=get_blob_urls(data_samples),
-        expected_data_samples=get_blob_properties_only_data_samples(
-            data_samples,
-            dataset_container.container_name,
-        ),
-        dataset_from_url_kwargs={"transform": blob_properties_only_transform},
-    )
+def map_dataset_from_blob_urls_with_transform_case(
+    create_from_blob_urls_dataset_case, transform_case_kwargs
+):
+    return create_from_blob_urls_dataset_case(BlobDataset, **transform_case_kwargs)
 
 
 @pytest.fixture(scope="module")
 def map_dataset_from_blob_urls_with_different_containers_case(
-    data_samples, other_data_samples
+    create_from_blob_urls_dataset_case, different_containers_case_kwargs
 ):
-    urls = get_blob_urls(data_samples) + get_blob_urls(other_data_samples)
-    return DatasetCase(
-        dataset_from_url_method=BlobDataset.from_blob_urls,
-        url=urls,
-        expected_data_samples=data_samples + other_data_samples,
+    return create_from_blob_urls_dataset_case(
+        BlobDataset, **different_containers_case_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_container_url_case(create_from_container_url_dataset_case):
+    return create_from_container_url_dataset_case(IterableBlobDataset)
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_container_url_with_prefix_case(
+    create_from_container_url_dataset_case, prefix_case_kwargs
+):
+    return create_from_container_url_dataset_case(
+        IterableBlobDataset, **prefix_case_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_container_url_with_transform_case(
+    create_from_container_url_dataset_case, transform_case_kwargs
+):
+    return create_from_container_url_dataset_case(
+        IterableBlobDataset, **transform_case_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_blob_urls_case(create_from_blob_urls_dataset_case):
+    return create_from_blob_urls_dataset_case(IterableBlobDataset)
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_blob_urls_with_single_blob_url_case(
+    create_from_blob_urls_dataset_case, single_blob_url_case_kwargs
+):
+    return create_from_blob_urls_dataset_case(
+        IterableBlobDataset, **single_blob_url_case_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_blob_urls_with_transform_case(
+    create_from_blob_urls_dataset_case, transform_case_kwargs
+):
+    return create_from_blob_urls_dataset_case(
+        IterableBlobDataset, **transform_case_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def iterable_dataset_from_blob_urls_with_different_containers_case(
+    create_from_blob_urls_dataset_case, different_containers_case_kwargs
+):
+    return create_from_blob_urls_dataset_case(
+        IterableBlobDataset, **different_containers_case_kwargs
     )
 
 
@@ -204,7 +319,17 @@ class TestDatasets:
         "map_dataset_from_blob_urls_with_transform",
         "map_dataset_from_blob_urls_with_different_containers",
     ]
-    ALL_CASES = MAP_CASES
+    ITERABLE_CASES = [
+        "iterable_dataset_from_container_url",
+        "iterable_dataset_from_container_url_with_prefix",
+        "iterable_dataset_from_container_url_with_transform",
+        "iterable_dataset_from_blob_urls",
+        "iterable_dataset_from_blob_urls_with_single_blob_url",
+        "iterable_dataset_from_blob_urls_with_transform",
+        "iterable_dataset_from_blob_urls_with_different_containers",
+    ]
+
+    ALL_CASES = MAP_CASES + ITERABLE_CASES
     # TODO: Add case for large dataset that requires multiple pages.
 
     def batched(self, data_samples, batch_size=1):
@@ -221,9 +346,16 @@ class TestDatasets:
     @pytest.mark.parametrize("dataset_case", MAP_CASES, indirect=True)
     def test_map_dataset(self, dataset_case):
         dataset = dataset_case.to_dataset()
+        assert isinstance(dataset, BlobDataset)
         assert len(dataset) == len(dataset_case.expected_data_samples)
-        for i, sample in enumerate(dataset):
-            assert sample == dataset_case.expected_data_samples[i]
+        for i in range(len(dataset)):
+            assert dataset[i] == dataset_case.expected_data_samples[i]
+
+    @pytest.mark.parametrize("dataset_case", ITERABLE_CASES, indirect=True)
+    def test_iterable_dataset(self, dataset_case):
+        dataset = dataset_case.to_dataset()
+        assert isinstance(dataset, IterableBlobDataset)
+        assert list(dataset) == dataset_case.expected_data_samples
 
     @pytest.mark.parametrize("dataset_case", ALL_CASES, indirect=True)
     def test_default_loader(self, dataset_case):
@@ -258,7 +390,7 @@ class TestDatasets:
             dataset_case.expected_data_samples, batch_size=4
         )
 
-    @pytest.mark.parametrize("dataset_case", ALL_CASES, indirect=True)
+    @pytest.mark.parametrize("dataset_case", MAP_CASES, indirect=True)
     def test_loader_with_shuffle(self, dataset_case):
         dataset = dataset_case.to_dataset()
         loader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=True)
