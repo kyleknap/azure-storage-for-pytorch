@@ -30,10 +30,42 @@ _AZSTORAGETORCH_CREDENTIAL_TYPE = Union[_SDK_CREDENTIAL_TYPE, Literal[False]]
 
 
 class BlobIO(io.IOBase):
-    """
-    BlobIO is a file-like object that provides an interface for reading and writing to Azure Blob Storage.
-    """
+    """File-like object for reading and writing blobs in Azure Blob Storage.
 
+    Use this class directly for PyTorch checkpointing by passing it directly to
+    :py:func:`torch.save()` or :py:func:`torch.load()`::
+
+        import torch
+        import torchvision.models
+        from azstoragetorch.io import BlobIO
+
+        CONTAINER_URL = "https://<my-storage-account-name>.blob.core.windows.net/<my-container-name>"
+
+        # Sample model to save and load. Replace with your own model.
+        model = torchvision.models.resnet18(pretrained=True)
+
+        # Save trained model to Azure Blob Storage. This saves the model weights
+        # to a blob named "model_weights.pth" in the container specified by CONTAINER_URL.
+        with BlobIO(f"{CONTAINER_URL}/model_weights.pth", "wb") as f:
+            torch.save(model.state_dict(), f)
+
+        # Load trained model from Azure Blob Storage.  This loads the model weights
+        # from the blob named "model_weights.pth" in the container specified by CONTAINER_URL.
+        with BlobIO(f"{CONTAINER_URL}/model_weights.pth", "rb") as f:
+            model.load_state_dict(torch.load(f))
+
+    :param blob_url: The full endpoint URL to the blob. The URL supports including
+        SAS tokens, snapshots, and version IDs in its query string.
+    :param mode: The mode in which to open the blob. Supported modes are:
+
+        * ``rb`` - Opens blob for reading
+        * ``wb`` - Opens blob for writing
+
+    :param credential: The credential to use for authentication. If not specified,
+        :py:class:`azure.identity.DefaultAzureCredential` will be used. When set to
+        ``False``, anonymous requests will be made. If the ``blob_url`` contains a SAS token,
+        this parameter is ignored.
+    """
     _READLINE_PREFETCH_SIZE = 4 * 1024 * 1024
     _READLINE_TERMINATOR = b"\n"
     _WRITE_BUFFER_SIZE = 32 * 1024 * 1024
@@ -68,6 +100,15 @@ class BlobIO(io.IOBase):
         self._stage_block_exception: Optional[BaseException] = None
 
     def close(self) -> None:
+        """Close the file-like object.
+
+        In write mode, this will :py:meth:`flush` and commit the blob.
+
+        :raises FatalBlobIOWriteError: if a fatal error occurs when writing to blob. If
+            raised, no data written, nor uploaded, using this :py:class:`BlobIO` instance will be
+            committed to the blob. It is recommended to create a new :py:class:`BlobIO`
+            instance and retry all writes when attempting retries.
+        """
         if self.closed:
             return
         try:
@@ -83,23 +124,33 @@ class BlobIO(io.IOBase):
 
     @property
     def closed(self) -> bool:
-        """
-        Return whether the IO object is closed.
-        """
+        """Return whether the file-like object is closed."""
         return self._closed
 
     def fileno(self) -> int:
         raise OSError("BlobIO object has no fileno")
 
     def flush(self) -> None:
+        """Flush all written data to the blob.
+
+        When called, any unstaged data will be uploaded and method will
+        block until all uploads complete. In read mode, this method has no effect.
+
+        :raises FatalBlobIOWriteError: if a fatal error occurs when writing to blob. If
+            raised, no data written, nor uploaded, using this :py:class:`BlobIO` instance will be
+            committed to the blob. It is recommended to create a new :py:class:`BlobIO`
+            instance and retry all writes when attempting retries.
+        """
         self._validate_not_closed()
         self._flush()
 
     def read(self, size: Optional[int] = -1, /) -> bytes:
-        """
-        Read bytes from the blob.
-        """
+        """Read bytes from the blob.
 
+        :param size: The maximum number of bytes to read. If not specified, all bytes will be read.
+
+        :return: The bytes read from the blob.
+        """
         if size is not None:
             self._validate_is_integer("size", size)
             self._validate_min("size", size, -1)
@@ -109,27 +160,25 @@ class BlobIO(io.IOBase):
         return self._read(size)
 
     def readable(self) -> bool:
-        """
-        Return whether object was opened for reading.
+        """Return whether file-like object is readable.
 
-        If False, :meth:`read` will raise :exc:`OSError`.
+        :returns: ``True`` if opened in read mode, ``False`` otherwise.
         """
-
         if self._is_read_mode():
             self._validate_not_closed()
             return True
         return False
 
     def readline(self, size: Optional[int] = -1, /) -> bytes:
+        """Read and return a line from the file-like object.
+
+        The line terminator is always ``b'\\n'``.
+
+        :param size: The maximum number of bytes to read. If not specified, all bytes
+            will be read up to the next line terminator.
+
+        :returns: The bytes read from the blob.
         """
-        Read and return a line from the stream.
-
-        If size is specified, at most size bytes will be read.
-
-        The line terminator is always b'n' for binary files; for text files, the newlines
-        argument to :func:`open` can be used to select the line terminator(s) recognized.
-        """
-
         if size is not None:
             self._validate_is_integer("size", size)
         self._validate_readable()
@@ -137,13 +186,16 @@ class BlobIO(io.IOBase):
         return self._readline(size)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET, /) -> int:
-        """
-        Change the stream position to the given byte offset, interpreted relative to the position 
-        indicated by whence, and return the new absolute position. Values for whence are:
-        
-        - :attr:`os.SEEK_SET` or 0: start of the stream (the default); offset should be zero or positive
-        - :attr:`os.SEEK_CUR` or 1: current stream position; offset may be negative
-        - :attr:`os.SEEK_END` or 2: end of the stream; offset is usually negative
+        """Change the file-like position to a given byte offset.
+
+        :param offset: The offset to seek to
+        :param whence: The reference point for the offset. Accepted values are:
+
+            * :py:data:`os.SEEK_SET` - The start of the file-like object (the default)
+            * :py:data:`os.SEEK_CUR` - The current position in the file-like object
+            * :py:data:`os.SEEK_END` - The end of the file-like object
+
+        :returns: The new absolute position in the file-like object.
         """
         
         self._validate_is_integer("offset", offset)
@@ -154,33 +206,50 @@ class BlobIO(io.IOBase):
         return self._seek(offset, whence)
 
     def seekable(self) -> bool:
-        """
-        Return whether object supports random access.
+        """Return whether file-like object supports random access.
 
-        If False, :meth:`seek` and :meth:`tell` will raise :exc:`OSError`.
+        :returns: ``True`` if can seek, ``False`` otherwise. Seeking
+            is only supported in read mode.
         """
 
         return self.readable()
 
     def tell(self) -> int:
+        """Return the current position in the file-like object.
+
+        :returns: The current position in the file-like object.
+        """
         self._validate_not_closed()
         return self._position
 
     def write(self, b: _SUPPORTED_WRITE_TYPES, /) -> int:
-        """
-        Writes a bytes-like object to the blob and returns the number of bytes written.
-        """
+        """Writes a bytes-like object to the blob
 
+        Data written may not be immediately uploaded. Instead, data may be uploaded
+        via threads after :py:meth:`write` has returned or may be uploaded as part
+        of subsequent calls to :py:class:`BlobIO` methods. This means if :py:meth:`write`
+        has returned without an error, it does not mean the data was successfully uploaded to
+        the blob. Calls to :py:meth:`flush` or :py:meth:`close` will uploade all pending
+        data, block until all data is uploaded, and propogates any errors.
+
+        :param b: The bytes-like object to write to the blob.
+
+        :returns: The number of bytes written
+
+        :raises FatalBlobIOWriteError: if a fatal error occurs when writing to blob. If
+            raised, no data written, nor uploaded, using this :py:class:`BlobIO` instance will be
+            committed to the blob. It is recommended to create a new :py:class:`BlobIO`
+            instance and retry all writes when attempting retries.
+        """
         self._validate_supported_write_type(b)
         self._validate_writable()
         self._validate_not_closed()
         return self._write(b)
 
     def writable(self) -> bool:
-        """
-        Return whether object was opened for writing.
+        """Return whether file-like object is writeable.
 
-        If False, :meth:`write` will raise :exc:`OSError`.
+        :returns: ``True`` if opened in write mode, ``False`` otherwise.
         """
 
         if self._is_write_mode():

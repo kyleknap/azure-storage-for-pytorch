@@ -24,8 +24,17 @@ language = 'Python'
 
 html_theme = 'furo'
 
-extensions = ['sphinx.ext.autodoc', 'sphinx.ext.intersphinx']
+extensions = [
+    'sphinx.ext.autodoc',
+    'sphinx.ext.intersphinx',
+    'sphinx_copybutton',
+]
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
+    'torch': ('https://pytorch.org/docs/stable/', None),
+    'azure-core': ('https://azuresdkdocs.z19.web.core.windows.net/python/azure-core/latest/', None),
+    'azure-identity': ('https://azuresdkdocs.z19.web.core.windows.net/python/azure-identity/latest/', None),
 }
+
+autodoc_typehints = 'both'
