@@ -9,15 +9,20 @@ import os
 import threading
 import pytest
 
-from azure.core.credentials import AzureSasCredential
+from azure.core.credentials import AzureSasCredential, AzureNamedKeyCredential
 import azure.core.exceptions
 from azure.core.pipeline.transport import HttpResponse
+from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobClient, BlobProperties, StorageErrorCode, BlobBlock
 from azure.storage.blob._generated._azure_blob_storage import AzureBlobStorage
 from azure.storage.blob._generated.operations import BlobOperations
 from azure.storage.blob._generated.models import ModifiedAccessConditions
+from azure.core.pipeline.transport import RequestsTransport
 
-from azstoragetorch._client import AzStorageTorchBlobClient
+from azstoragetorch._client import (
+    AzStorageTorchBlobClient,
+    AzStorageTorchBlobClientFactory,
+)
 from tests.unit.utils import random_bytes
 from azstoragetorch._version import __version__
 
@@ -37,6 +42,11 @@ PROCESS_CPU_COUNT_UNAVAILABLE = object()
 def sleep_patch():
     with mock.patch("time.sleep") as patched_sleep:
         yield patched_sleep
+
+
+@pytest.fixture
+def sas_token():
+    return "sp=r&st=2024-10-28T20:22:30Z&se=2024-10-29T04:22:30Z&spr=https&sv=2022-11-02&sr=c&sig=signature"
 
 
 @pytest.fixture
@@ -134,6 +144,172 @@ class SpySubmitExcecutor(concurrent.futures.ThreadPoolExecutor):
         return super().submit(fn, *args, **kwargs)
 
 
+class TestAzStorageTorchBlobClientFactory:
+    @pytest.fixture(autouse=True)
+    def sdk_blob_client_patch(self, mock_sdk_blob_client):
+        with mock.patch("azure.storage.blob.BlobClient", mock_sdk_blob_client):
+            yield mock_sdk_blob_client
+
+    def assert_expected_from_blob_url_call(
+        self,
+        mock_blob_client,
+        expected_url,
+        expected_credential=mock.ANY,
+        expected_transport=mock.ANY,
+    ):
+        mock_blob_client.from_blob_url.assert_called_once_with(
+            expected_url,
+            credential=expected_credential,
+            transport=expected_transport,
+            connection_data_block_size=256 * 1024,
+            user_agent=f"azstoragetorch/{__version__}",
+        )
+
+    def get_credential_used(self, mock_sdk_blob_client):
+        return self.get_sdk_kwarg_used(mock_sdk_blob_client, "credential")
+
+    def get_transport_used(self, mock_sdk_blob_client):
+        return self.get_sdk_kwarg_used(mock_sdk_blob_client, "transport")
+
+    def get_sdk_kwarg_used(self, mock_sdk_blob_client, kwarg_name):
+        return mock_sdk_blob_client.from_blob_url.call_args[1][kwarg_name]
+
+    def test_get_blob_client_from_url(self, blob_url, mock_sdk_blob_client):
+        factory = AzStorageTorchBlobClientFactory()
+        with mock.patch(
+            "azstoragetorch._client.AzStorageTorchBlobClient", spec=True
+        ) as mock_azstorage_blob_client_cls:
+            returned_client = factory.get_blob_client_from_url(blob_url)
+            assert returned_client is mock_azstorage_blob_client_cls.return_value
+            mock_azstorage_blob_client_cls.assert_called_once_with(
+                mock_sdk_blob_client.from_blob_url.return_value
+            )
+            self.assert_expected_from_blob_url_call(
+                mock_sdk_blob_client, expected_url=blob_url
+            )
+
+    def test_credential_defaults_to_azure_default_credential(
+        self, blob_url, mock_sdk_blob_client
+    ):
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client, expected_url=blob_url
+        )
+        assert isinstance(
+            self.get_credential_used(mock_sdk_blob_client), DefaultAzureCredential
+        )
+
+    @pytest.mark.parametrize(
+        "credential",
+        [
+            DefaultAzureCredential(),
+            AzureSasCredential("sas"),
+        ],
+    )
+    def test_respects_user_provided_credential(
+        self, blob_url, mock_sdk_blob_client, credential
+    ):
+        factory = AzStorageTorchBlobClientFactory(credential=credential)
+        factory.get_blob_client_from_url(blob_url)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client, expected_url=blob_url, expected_credential=credential
+        )
+
+    def test_anonymous_credential(self, blob_url, mock_sdk_blob_client):
+        factory = AzStorageTorchBlobClientFactory(credential=False)
+        factory.get_blob_client_from_url(blob_url)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client, expected_url=blob_url, expected_credential=None
+        )
+
+    def test_detects_sas_token_in_blob_url(
+        self, blob_url, mock_sdk_blob_client, sas_token
+    ):
+        blob_url_with_sas = f"{blob_url}?{sas_token}"
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url_with_sas)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client,
+            expected_url=blob_url_with_sas,
+            expected_credential=None,
+        )
+
+    def test_sas_token_in_blob_url_overrides_credential(
+        self, blob_url, mock_sdk_blob_client, sas_token
+    ):
+        blob_url_with_sas = f"{blob_url}?{sas_token}"
+        factory = AzStorageTorchBlobClientFactory(credential=DefaultAzureCredential())
+        factory.get_blob_client_from_url(blob_url_with_sas)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client,
+            expected_url=blob_url_with_sas,
+            expected_credential=None,
+        )
+
+    def test_credential_defaults_to_azure_default_credential_for_snapshot_url(
+        self, blob_url, mock_sdk_blob_client
+    ):
+        snapshot_url = f"{blob_url}?snapshot=2024-10-28T20:34:36.1724588Z"
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(snapshot_url)
+        self.assert_expected_from_blob_url_call(
+            mock_sdk_blob_client, expected_url=snapshot_url
+        )
+        assert isinstance(
+            self.get_credential_used(mock_sdk_blob_client), DefaultAzureCredential
+        )
+
+    @pytest.mark.parametrize(
+        "credential",
+        [
+            "key",
+            {"account_name": "name", "account_key": "key"},
+            AzureNamedKeyCredential("name", "key"),
+        ],
+    )
+    def test_raises_for_unsupported_credential(self, credential):
+        with pytest.raises(TypeError, match="Unsupported credential"):
+            AzStorageTorchBlobClientFactory(credential=credential)
+
+    def test_reuses_credential(self, blob_url, mock_sdk_blob_client):
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url)
+        first_credential_used = self.get_credential_used(mock_sdk_blob_client)
+        assert isinstance(first_credential_used, DefaultAzureCredential)
+
+        factory.get_blob_client_from_url(blob_url)
+        assert mock_sdk_blob_client.from_blob_url.call_count == 2
+        second_credential_used = self.get_credential_used(mock_sdk_blob_client)
+        assert first_credential_used is second_credential_used
+
+    def test_transport_defaults(self, blob_url, mock_sdk_blob_client):
+        with mock.patch(
+            "azstoragetorch._client.RequestsTransport", spec=True
+        ) as mock_requests_transport_cls:
+            factory = AzStorageTorchBlobClientFactory()
+            factory.get_blob_client_from_url(blob_url)
+            self.assert_expected_from_blob_url_call(
+                mock_sdk_blob_client,
+                expected_url=blob_url,
+                expected_transport=mock_requests_transport_cls.return_value,
+            )
+            mock_requests_transport_cls.assert_called_once_with(
+                connection_timeout=20, read_timeout=60
+            )
+
+    def test_reuses_transport(self, blob_url, mock_sdk_blob_client):
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url)
+        first_transport_used = self.get_transport_used(mock_sdk_blob_client)
+        assert isinstance(first_transport_used, RequestsTransport)
+
+        factory.get_blob_client_from_url(blob_url)
+        assert mock_sdk_blob_client.from_blob_url.call_count == 2
+        second_transport_used = self.get_transport_used(mock_sdk_blob_client)
+        assert first_transport_used is second_transport_used
+
+
 class TestAzStorageTorchBlobClient:
     def assert_expected_download_calls(
         self, mock_generated_sdk_storage_client, expected_ranges, expected_etag
@@ -155,18 +331,6 @@ class TestAzStorageTorchBlobClient:
     def assert_stage_block_ids(self, stage_block_futures, expected_block_ids):
         actual_block_ids = [future.result() for future in stage_block_futures]
         assert actual_block_ids == expected_block_ids
-
-    def test_from_blob_url(self, blob_url, mock_sdk_blob_client):
-        credential = AzureSasCredential("sas")
-        with mock.patch("azure.storage.blob.BlobClient") as patched_sdk_blob_client:
-            client = AzStorageTorchBlobClient.from_blob_url(blob_url, credential)
-            assert isinstance(client, AzStorageTorchBlobClient)
-            patched_sdk_blob_client.from_blob_url.assert_called_once_with(
-                blob_url,
-                credential=credential,
-                connection_data_block_size=256 * 1024,
-                user_agent=f"azstoragetorch/{__version__}",
-            )
 
     @pytest.mark.parametrize(
         "cpu_count,process_cpu_count,expected_max_workers",
