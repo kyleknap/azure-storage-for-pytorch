@@ -40,5 +40,6 @@ intersphinx_mapping = {
     'azure-identity': ('https://azuresdkdocs.z19.web.core.windows.net/python/azure-identity/latest/', None),
 }
 
-autodoc_typehints = 'both'
+autodoc_typehints = 'description'
 autodoc_typehints_description_target = 'documented_params'
+# autodoc_class_signature = 'separated'
