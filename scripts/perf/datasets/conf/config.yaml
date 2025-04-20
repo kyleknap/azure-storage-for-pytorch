@@ -1,0 +1,31 @@
+dataset-cls: BlobDataset
+dataset-cls-method: from_blob_urls
+list-type: name
+proxy-blob-properties: false
+transform: read
+num-workers: 0
+
+blob:
+  account: azstoragetorchdev
+  container: models
+  name-starts-with: datasets-50000/
+  sas-env-var: AZURE_STORAGE_SAS_TOKEN
+
+num-runs: 1
+
+hydra:
+  sweeper:
+    params:
+      # ++dataset-cls-method: from_blob_urls,from_container_url
+
+      # Uncomment to try different list client methods
+#       dataset-cls-method: from_container_url
+#       ++list-type: name,full
+
+      # Uncomment to do blob props and no blob props
+      # dataset-cls-method: from_container_url
+      # list-type: full
+      # ++proxy-blob-properties: true,false
+
+      dataset-cls-method: from_blob_urls
+      ++share-pipeline: true,false
