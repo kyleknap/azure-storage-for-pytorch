@@ -577,27 +577,15 @@ class TestAzStorageTorchBlobClient:
                 "https://account.blob.core.windows.net/container/blob",
                 "https://account.blob.core.windows.net/container/blob",
             ),
-            # URL with SAS token. SAS token should be removed.
+            # Cases to make sure query string is not included in returned URL.
             (
                 f"https://account.blob.core.windows.net/container/blob?{SAS_TOKEN}",
                 "https://account.blob.core.windows.net/container/blob",
             ),
-            # URL with snapshot. Snapshot should be kept
-            (
-                f"https://account.blob.core.windows.net/container/blob?snapshot={SNAPSHOT}",
-                f"https://account.blob.core.windows.net/container/blob?snapshot={SNAPSHOT}",
-            ),
-            # URL with version ID. Version ID should be kept
-            (
-                f"https://account.blob.core.windows.net/container/blob?versionid={VERSION_ID}",
-                f"https://account.blob.core.windows.net/container/blob?versionid={VERSION_ID}",
-            ),
-            # URL with snapshot, version ID, and SAS token. SAS token should be removed
             (
                 f"https://account.blob.core.windows.net/container/blob?snapshot={SNAPSHOT}&versionid={VERSION_ID}&{SAS_TOKEN}",
-                f"https://account.blob.core.windows.net/container/blob?snapshot={SNAPSHOT}&versionid={VERSION_ID}",
+                f"https://account.blob.core.windows.net/container/blob",
             ),
-            # URL with unknown query parameters. Unknown query parameters should be removed
             (
                 "https://account.blob.core.windows.net/container/blob?unknown1=val1&unknown2=val2",
                 "https://account.blob.core.windows.net/container/blob",

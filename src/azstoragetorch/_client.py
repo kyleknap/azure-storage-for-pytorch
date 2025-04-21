@@ -180,7 +180,7 @@ class AzStorageTorchBlobClient:
         parsed_url = urllib.parse.urlparse(blob_sdk_url)
         if parsed_url.query is None:
             return blob_sdk_url
-        return self._get_url_with_filtered_query_string(parsed_url)
+        return self._get_url_without_query_string(parsed_url)
 
     @property
     def blob_name(self) -> str:
@@ -352,33 +352,21 @@ class AzStorageTorchBlobClient:
     def _release_in_flight_semaphore(self, _: STAGE_BLOCK_FUTURE_TYPE) -> None:
         self._max_in_flight_semaphore.release()
 
-    def _get_url_with_filtered_query_string(
+    def _get_url_without_query_string(
         self, parsed_url: urllib.parse.ParseResult
     ) -> str:
-        # Helper method to only include indentifying query string parameters for a blob URL. More specifically,
-        # we do not want to return any SAS tokens in the URL as it can accidentally result in leaking credentials
-        # as part of interfaces that expose the URL (e.g., azstoragetorch.datasets.Blob).
+        # Helper method to only include scheme, network location, and path for a blob URL.
+        # More specifically, we do not want to return any SAS tokens in the URL as it can
+        # accidentally result in leaking credentials as part of interfaces that expose the
+        # URL (e.g., azstoragetorch.datasets.Blob) so we just remove all URL components past
+        # the path.
         return urllib.parse.urlunparse(
             (
                 parsed_url.scheme,
                 parsed_url.netloc,
                 parsed_url.path,
-                parsed_url.params,
-                self._filter_query_string(parsed_url.query),
-                parsed_url.fragment,
+                None,
+                None,
+                None,
             )
         )
-
-    def _filter_query_string(self, qs: str) -> str:
-        # Ideally, we would be using urllib.parse to handle deconstructiong and reconstruction
-        # but the utilites also include quoting. This is an issue because parameters are often
-        # provided unquoted to the input URL (e.g., timestamps in URL use ":" instead of "%3A")
-        # and by avoiding quoting, we can better ensure the URL roundtripss correctly, matching
-        # the input URL.
-        qs_components = qs.split("&")
-        new_qs_components = []
-        for qs_component in qs_components:
-            for qs_parameter_to_include in self._QS_PARAMETERS_TO_INCLUDE:
-                if qs_component.startswith(f"{qs_parameter_to_include}="):
-                    new_qs_components.append(qs_component)
-        return "&".join(new_qs_components)
