@@ -165,14 +165,6 @@ class AzStorageTorchBlobClient:
             max_in_flight_requests = self._get_max_in_flight_requests()
         self._max_in_flight_requests = max_in_flight_requests
         self._executor = executor
-        # The standard thread pool executor does not bound the number of tasks submitted to it.
-        # This semaphore introduces bound so that the number of submitted, in-progress
-        # futures are not greater than the available workers. This is important for cases where we
-        # buffer data into memory for uploads as is prevents large amounts of memory from being
-        # submitted to the executor when there are no workers available to upload it.
-        self._max_in_flight_semaphore = threading.Semaphore(
-            self._max_in_flight_requests
-        )
 
     @property
     def url(self) -> str:
@@ -248,6 +240,15 @@ class AzStorageTorchBlobClient:
                 self._max_in_flight_requests
             )
         return self._executor
+
+    @functools.cached_property
+    def _max_in_flight_semaphore(self) -> threading.Semaphore:
+        # The standard thread pool executor does not bound the number of tasks submitted to it.
+        # This semaphore introduces bound so that the number of submitted, in-progress
+        # futures are not greater than the available workers. This is important for cases where we
+        # buffer data into memory for uploads as is prevents large amounts of memory from being
+        # submitted to the executor when there are no workers available to upload it.
+        return threading.Semaphore(self._max_in_flight_requests)
 
     @functools.cached_property
     def _blob_properties(self) -> azure.storage.blob.BlobProperties:
