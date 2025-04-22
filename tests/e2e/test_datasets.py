@@ -4,6 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import urllib.parse
 from typing import Union, Any
@@ -15,18 +16,28 @@ from azstoragetorch.datasets import BlobDataset, IterableBlobDataset
 
 
 def generate_and_upload_data_samples(num_samples, container_client, blob_prefix=""):
-    samples = []
-    for i in range(num_samples):
-        blob_name = f"{blob_prefix}{i}.txt"
-        content = f"Sample content for {blob_name}".encode("utf-8")
-        container_client.upload_blob(name=blob_name, data=content)
-        samples.append(
-            {
-                "url": f"{container_client.url}/{blob_name}",
-                "data": content,
-            }
-        )
-    return samples
+    futures = []
+    with ThreadPoolExecutor() as executor:
+        for i in range(num_samples):
+            futures.append(
+                executor.submit(
+                    generate_and_upload_data_sample,
+                    i,
+                    container_client,
+                    blob_prefix=blob_prefix,
+                )
+            )
+    return [future.result() for future in futures]
+
+
+def generate_and_upload_data_sample(index, container_client, blob_prefix=""):
+    blob_name = f"{blob_prefix}{index}.txt"
+    content = f"Sample content for {blob_name}".encode("utf-8")
+    container_client.upload_blob(name=blob_name, data=content)
+    return {
+        "url": f"{container_client.url}/{blob_name}",
+        "data": content,
+    }
 
 
 def parse_blob_name_from_url(blob_url):
@@ -88,6 +99,21 @@ def other_data_samples(other_dataset_container):
 
 
 @pytest.fixture(scope="module")
+def many_data_samples(many_samples_dataset_container):
+    # The default page size for list blobs is 5000. So generate
+    # a dataset with more than 5000 blobs to confirm the from_container_url
+    # methods fully load all blobs, even if it requires multiple pages.
+    #
+    # Also, sort the samples based on the blob name to match the return order
+    # from the list blobs API.
+    return sort_samples(
+        generate_and_upload_data_samples(
+            6000, many_samples_dataset_container, blob_prefix="many-samples-"
+        )
+    )
+
+
+@pytest.fixture(scope="module")
 def dataset_container(create_container):
     container_client = create_container()
     yield container_client
@@ -96,6 +122,13 @@ def dataset_container(create_container):
 
 @pytest.fixture(scope="module")
 def other_dataset_container(create_container):
+    container_client = create_container()
+    yield container_client
+    container_client.delete_container()
+
+
+@pytest.fixture(scope="module")
+def many_samples_dataset_container(create_container):
     container_client = create_container()
     yield container_client
     container_client.delete_container()
@@ -201,6 +234,14 @@ def different_containers_case_kwargs(data_samples, other_data_samples):
 
 
 @pytest.fixture(scope="module")
+def many_samples_case_kwargs(many_samples_dataset_container, many_data_samples):
+    return {
+        "container": many_samples_dataset_container,
+        "expected_data_samples": many_data_samples,
+    }
+
+
+@pytest.fixture(scope="module")
 def map_dataset_from_container_url_case(create_from_container_url_dataset_case):
     return create_from_container_url_dataset_case(BlobDataset)
 
@@ -217,6 +258,15 @@ def map_dataset_from_container_url_with_transform_case(
     create_from_container_url_dataset_case, transform_case_kwargs
 ):
     return create_from_container_url_dataset_case(BlobDataset, **transform_case_kwargs)
+
+
+@pytest.fixture(scope="module")
+def map_dataset_from_container_url_with_many_data_samples_case(
+    create_from_container_url_dataset_case, many_samples_case_kwargs
+):
+    return create_from_container_url_dataset_case(
+        BlobDataset, **many_samples_case_kwargs
+    )
 
 
 @pytest.fixture(scope="module")
@@ -304,6 +354,15 @@ def iterable_dataset_from_blob_urls_with_different_containers_case(
     )
 
 
+@pytest.fixture(scope="module")
+def iterable_dataset_from_container_url_with_many_data_samples_case(
+    create_from_container_url_dataset_case, many_samples_case_kwargs
+):
+    return create_from_container_url_dataset_case(
+        IterableBlobDataset, **many_samples_case_kwargs
+    )
+
+
 @pytest.fixture
 def dataset_case(request):
     return request.getfixturevalue(f"{request.param}_case")
@@ -328,8 +387,18 @@ class TestDatasets:
         "iterable_dataset_from_blob_urls_with_transform",
         "iterable_dataset_from_blob_urls_with_different_containers",
     ]
-
-    ALL_CASES = MAP_CASES + ITERABLE_CASES
+    # Separate the many samples cases from the other cases to help reduce
+    # end to end test runtime. These cases have magnitudes more blobs and
+    # including them with the other cases would drastically slow down the
+    # test suite. So we selectively run the many samples cases to make
+    # sure the implementations can handle larger number of blobs but not
+    # necessarily run them for every test case.
+    MANY_SAMPLES_CASES = [
+        "map_dataset_from_container_url_with_many_data_samples",
+        "iterable_dataset_from_container_url_with_many_data_samples",
+    ]
+    CORE_CASES = MAP_CASES + ITERABLE_CASES
+    ALL_CASES = CORE_CASES + MANY_SAMPLES_CASES
 
     def batched(self, data_samples, batch_size=1):
         batched_samples = []
@@ -356,7 +425,7 @@ class TestDatasets:
         assert isinstance(dataset, IterableBlobDataset)
         assert list(dataset) == dataset_case.expected_data_samples
 
-    @pytest.mark.parametrize("dataset_case", ALL_CASES, indirect=True)
+    @pytest.mark.parametrize("dataset_case", CORE_CASES, indirect=True)
     def test_default_loader(self, dataset_case):
         dataset = dataset_case.to_dataset()
         loader = torch.utils.data.DataLoader(dataset)
@@ -365,7 +434,7 @@ class TestDatasets:
             dataset_case.expected_data_samples, batch_size=1
         )
 
-    @pytest.mark.parametrize("dataset_case", ALL_CASES, indirect=True)
+    @pytest.mark.parametrize("dataset_case", CORE_CASES, indirect=True)
     def test_can_load_across_multiple_epochs(self, dataset_case):
         dataset = dataset_case.to_dataset()
         loader = torch.utils.data.DataLoader(dataset, batch_size=None)
@@ -380,7 +449,7 @@ class TestDatasets:
         loaded_samples = list(loader)
         assert loaded_samples == dataset_case.expected_data_samples
 
-    @pytest.mark.parametrize("dataset_case", ALL_CASES, indirect=True)
+    @pytest.mark.parametrize("dataset_case", CORE_CASES, indirect=True)
     def test_loader_with_batch_size(self, dataset_case):
         dataset = dataset_case.to_dataset()
         loader = torch.utils.data.DataLoader(dataset, batch_size=4)
