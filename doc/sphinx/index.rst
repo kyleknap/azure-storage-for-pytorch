@@ -25,5 +25,5 @@ API Reference
 
    api
 
-.. _Azure Storage: https://learn.microsoft.com/en-us/azure/storage/common/storage-introduction
+.. _Azure Storage: https://learn.microsoft.com/azure/storage/common/storage-introduction
 .. _PyTorch: https://pytorch.org/

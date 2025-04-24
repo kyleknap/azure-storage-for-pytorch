@@ -96,7 +96,7 @@ specify the URL to the blob storing the model weights and use read mode (i.e., `
 .. _Azure subscription: https://azure.microsoft.com/free/
 .. _Azure storage account: https://learn.microsoft.com/azure/storage/common/storage-account-overview
 .. _pip: https://pypi.org/project/pip/
-.. _Microsoft Entra ID tokens: https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-access-azure-active-directory
-.. _DefaultAzureCredential guide: https://learn.microsoft.com/en-us/azure/developer/python/sdk/authentication/credential-chains?tabs=dac#defaultazurecredential-overview
-.. _SAS: https://learn.microsoft.com/en-us/azure/storage/common/storage-sas-overview
+.. _Microsoft Entra ID tokens: https://learn.microsoft.com/azure/storage/blobs/authorize-access-azure-active-directory
+.. _DefaultAzureCredential guide: https://learn.microsoft.com/azure/developer/python/sdk/authentication/credential-chains?tabs=dac#defaultazurecredential-overview
+.. _SAS: https://learn.microsoft.com/azure/storage/common/storage-sas-overview
 .. _PyTorch checkpoint tutorial: https://pytorch.org/tutorials/beginner/saving_loading_models.html
