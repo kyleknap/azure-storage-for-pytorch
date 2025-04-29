@@ -1,0 +1,19 @@
+dataset-cls: BlobDataset
+dataset-cls-method: from_blob_urls
+num-workers: 4
+batch-size: 32
+
+blob:
+  account: azstoragetorchdev
+  container: demo
+  prefix: datasets/caltech101/
+  sas-env-var: AZURE_STORAGE_SAS_TOKEN
+
+num-runs: 1
+
+hydra:
+  sweeper:
+    params:
+      ++dataset-cls-method: from_blob_urls,from_container_url
+      ++dataset-cls: BlobDataset,IterableBlobDataset
+      num-runs: 10
