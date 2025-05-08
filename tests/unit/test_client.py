@@ -12,7 +12,7 @@ import pytest
 
 from azure.core.credentials import AzureSasCredential, AzureNamedKeyCredential
 import azure.core.exceptions
-from azure.core.pipeline.transport import HttpResponse
+from azure.core.pipeline.transport import HttpRequest, HttpResponse
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import (
     BlobClient,
@@ -25,11 +25,13 @@ from azure.storage.blob._generated._azure_blob_storage import AzureBlobStorage
 from azure.storage.blob._generated.operations import BlobOperations
 from azure.storage.blob._generated.models import ModifiedAccessConditions
 from azure.core.pipeline import Pipeline
+from azure.core.pipeline import PipelineRequest, PipelineResponse
 from azure.core.pipeline.transport import RequestsTransport
 
 from azstoragetorch._client import (
     AzStorageTorchBlobClient,
     AzStorageTorchBlobClientFactory,
+    EchoClientRequestIdPolicy,
 )
 from tests.unit.utils import random_bytes
 from azstoragetorch._version import __version__
@@ -145,6 +147,29 @@ def mock_uuid4():
         yield mock_uuid
 
 
+@pytest.fixture
+def echo_client_request_id_policy():
+    return EchoClientRequestIdPolicy()
+
+
+@pytest.fixture
+def mock_pipeline_request():
+    pipeline_request = mock.Mock(PipelineRequest)
+    pipeline_request.http_request = mock.Mock(HttpRequest)
+    pipeline_request.http_request.headers = {}
+    return pipeline_request
+
+
+@pytest.fixture
+def mock_pipeline_response():
+    pipeline_response = mock.Mock(PipelineResponse)
+    pipeline_response.http_response = mock.Mock(HttpResponse)
+    pipeline_response.http_response.headers = {
+        "x-ms-request-id": "request-id",
+    }
+    return pipeline_response
+
+
 def slice_bytes(content, range_value):
     start, end = range_value.split("-", 1)
     return content[int(start) : int(end) + 1]
@@ -210,6 +235,60 @@ class SpySubmitExcecutor(concurrent.futures.ThreadPoolExecutor):
     def submit(self, fn, *args, **kwargs):
         self.counter.increment()
         return super().submit(fn, *args, **kwargs)
+
+
+class TestEchoClientRequestIdPolicy:
+    def test_adds_client_request_id(
+        self, echo_client_request_id_policy, mock_pipeline_request, mock_uuid4
+    ):
+        mock_uuid4.return_value = "unique-id"
+        echo_client_request_id_policy.on_request(mock_pipeline_request)
+        mock_uuid4.assert_called_once()
+        assert (
+            mock_pipeline_request.http_request.headers["x-ms-client-request-id"]
+            == "unique-id"
+        )
+
+    def test_throws_if_client_request_id_mismatch(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+    ):
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        mock_pipeline_response.http_response.headers["x-ms-client-request-id"] = (
+            "does-not-match"
+        )
+        with pytest.raises(
+            azure.core.exceptions.AzureError,
+            match="does not match echoed client request ID",
+        ):
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+
+    def test_does_not_raise_if_client_request_id_matches(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+    ):
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        mock_pipeline_response.http_response.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        try:
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+        except azure.core.exceptions.AzureError as e:
+            pytest.fail(
+                f"Unexpected AzureError raised. Client request ID should match but received: {e}"
+            )
 
 
 class TestAzStorageTorchBlobClientFactory:
@@ -301,6 +380,9 @@ class TestAzStorageTorchBlobClientFactory:
             "credential": expected_credential,
             "transport": expected_transport,
             "user_agent": f"azstoragetorch/{__version__}",
+            "_additional_pipeline_policies": [
+                mock.ANY,
+            ],
         }
         if expected_pipeline is not None:
             expected_from_url_kwargs["_pipeline"] = expected_pipeline
@@ -318,6 +400,11 @@ class TestAzStorageTorchBlobClientFactory:
 
     def get_transport_used(self, mock_sdk_blob_client):
         return self.get_sdk_kwarg_used(mock_sdk_blob_client, "transport")
+
+    def get_additional_pipeline_policies_used(self, mock_sdk_blob_client):
+        return self.get_sdk_kwarg_used(
+            mock_sdk_blob_client, "_additional_pipeline_policies"
+        )
 
     def get_sdk_kwarg_used(
         self, mock_sdk_client, kwarg_name, from_url_method_name="from_blob_url"
@@ -535,6 +622,17 @@ class TestAzStorageTorchBlobClientFactory:
         self.assert_expected_from_blob_url_call(
             mock_sdk_blob_client, expected_url=blob_url, expected_pipeline=mock_pipeline
         )
+
+    def test_injects_echo_client_request_id_policy(
+        self, blob_url, mock_sdk_blob_client
+    ):
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url)
+        additional_policies = self.get_additional_pipeline_policies_used(
+            mock_sdk_blob_client
+        )
+        assert len(additional_policies) == 1
+        assert isinstance(additional_policies[0], EchoClientRequestIdPolicy)
 
     def test_yield_blob_clients_from_container_url(
         self,
