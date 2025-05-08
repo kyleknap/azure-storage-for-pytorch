@@ -195,6 +195,7 @@ class AzStorageTorchBlobClient:
             max_in_flight_requests = self._get_max_in_flight_requests()
         self._max_in_flight_requests = max_in_flight_requests
         self._executor = executor
+        self._blob_properties = None
 
     @property
     def url(self) -> str:
@@ -213,14 +214,26 @@ class AzStorageTorchBlobClient:
         return self._sdk_blob_client.container_name
 
     def get_blob_size(self) -> int:
-        return self._blob_properties.size
+        return self._get_blob_properties().size
 
     def download(self, offset: int = 0, length: Optional[int] = None) -> bytes:
+        initial_content = b""
+        if self._blob_properties is None:
+            initial_content = self._download_from_unknown_blob_size(offset, length)
+            offset = len(initial_content) + offset
+            if length is not None:
+                length = length - len(initial_content)
+            if not self._more_to_download(offset, length):
+                return initial_content
         length = self._update_download_length_from_blob_size(offset, length)
         if length < self._PARTITIONED_DOWNLOAD_THRESHOLD:
-            return self._download_with_retries(offset, length)
+            return b"".join(
+                [initial_content, self._download_with_retries(offset, length)]
+            )
         else:
-            return self._partitioned_download(offset, length)
+            return b"".join(
+                [initial_content, self._partitioned_download(offset, length)]
+            )
 
     def stage_blocks(
         self, data: SUPPORTED_WRITE_BYTES_LIKE_TYPE
@@ -285,9 +298,10 @@ class AzStorageTorchBlobClient:
         # submitted to the executor when there are no workers available to upload it.
         return threading.Semaphore(self._max_in_flight_requests)
 
-    @functools.cached_property
-    def _blob_properties(self) -> azure.storage.blob.BlobProperties:
-        return self._sdk_blob_client.get_blob_properties()
+    def _get_blob_properties(self) -> azure.storage.blob.BlobProperties:
+        if self._blob_properties is None:
+            self._blob_properties = self._sdk_blob_client.get_blob_properties()
+        return self._blob_properties
 
     def _update_download_length_from_blob_size(
         self, offset: int, length: Optional[int] = None
@@ -323,6 +337,22 @@ class AzStorageTorchBlobClient:
             partitions.append((start, size))
         return partitions
 
+    def _more_to_download(
+        self, updated_offset, remaining_length: Optional[int] = None
+    ) -> bool:
+        if self._blob_properties.size <= updated_offset:
+            return False
+        if remaining_length is not None and remaining_length == 0:
+            return False
+        return True
+
+    def _download_from_unknown_blob_size(
+        self, offset: int, length: Optional[int] = None
+    ) -> bytes:
+        if length is None or length > self._PARTITIONED_DOWNLOAD_THRESHOLD:
+            length = self._PARTITIONED_DOWNLOAD_THRESHOLD
+        return self._download_with_retries(offset, length)
+
     def _download_with_retries(self, pos: int, length: int) -> bytes:
         attempt = 0
         while self._attempts_remaining(attempt):
@@ -342,20 +372,54 @@ class AzStorageTorchBlobClient:
                 )
                 time.sleep(backoff_time)
 
+    def _set_blob_properties_from_download(self, response) -> None:
+        headers = response.response.headers
+        blob_size = self._get_size_from_range(headers["Content-Range"])
+        self._blob_properties = azure.storage.blob.BlobProperties(
+            **{"Content-Length": blob_size, "ETag": headers.get("ETag")}
+        )
+
     def _get_download_stream(self, pos: int, length: int) -> Iterator[bytes]:
         try:
-            return self._generated_sdk_storage_client.blob.download(
-                range=f"bytes={pos}-{pos + length - 1}",
-                modified_access_conditions=azure.storage.blob._generated.models.ModifiedAccessConditions(
-                    if_match=self._blob_properties.etag
-                ),
+            download_kwargs = {
+                "range": f"bytes={pos}-{pos + length - 1}",
+            }
+            if self._blob_properties is not None:
+                download_kwargs["modified_access_conditions"] = (
+                    azure.storage.blob._generated.models.ModifiedAccessConditions(
+                        if_match=self._blob_properties.etag
+                    )
+                )
+            response = self._generated_sdk_storage_client.blob.download(
+                **download_kwargs
             )
+            if self._blob_properties is None:
+                self._set_blob_properties_from_download(response)
+            return response
         except azure.core.exceptions.HttpResponseError as e:
+            if self._is_invalid_range_from_empty_blob_error(e):
+                self._blob_properties = azure.storage.blob.BlobProperties(
+                    **{"Content-Length": 0}
+                )
+                return b""
             # TODO: This is so that we properly map exceptions from the generated client to the correct
             # exception class and error code. In the future, prior to a GA, we should consider pulling
             # in this function or a derivative of it if we plan to continue to raise Azure Python SDK
             # exceptions from this library (i.e. instead of raising our own exception classes).
             process_storage_error(e)
+
+    def _get_size_from_range(self, range_header: str) -> int:
+        return int(range_header.split(" ", 1)[1].split("/", 1)[1])
+
+    def _is_invalid_range_from_empty_blob_error(
+        self, error: azure.core.exceptions.HttpResponseError
+    ) -> bool:
+        return (
+            error.response
+            and error.status_code == 416
+            and "Content-Range" in error.response.headers
+            and self._get_size_from_range(error.response.headers["Content-Range"]) == 0
+        )
 
     def _attempts_remaining(self, attempt_number: int) -> int:
         return max(self._NUM_DOWNLOAD_ATTEMPTS - attempt_number, 0)

@@ -286,6 +286,10 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.download.assert_called_once_with(
             offset=0, length=None
         )
+        assert mock_azstoragetorch_blob_client.mock_calls == [
+            mock.call.download(offset=0, length=None),
+            mock.call.get_blob_size(),
+        ]
 
     def test_read_with_size(
         self, blob_io, blob_content, mock_azstoragetorch_blob_client
@@ -326,6 +330,7 @@ class TestBlobIO:
         mock_azstoragetorch_blob_client.download.assert_called_once_with(
             offset=offset, length=None
         )
+        mock_azstoragetorch_blob_client.get_blob_size.assert_called_once()
 
     def test_read_beyond_end(
         self, blob_io, blob_content, mock_azstoragetorch_blob_client

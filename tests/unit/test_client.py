@@ -33,6 +33,7 @@ from azstoragetorch._client import (
 )
 from tests.unit.utils import random_bytes
 from azstoragetorch._version import __version__
+from azure.core.pipeline.transport._requests_basic import StreamDownloadGenerator
 
 MB = 1024 * 1024
 DEFAULT_PARTITION_DOWNLOAD_THRESHOLD = 16 * MB
@@ -88,10 +89,12 @@ def mock_generated_sdk_storage_client():
 
 
 @pytest.fixture
-def mock_sdk_blob_client(mock_generated_sdk_storage_client, mock_pipeline):
+
+def mock_sdk_blob_client(mock_generated_sdk_storage_client, mock_pipeline, blob_properties):
     mock_sdk_client = mock.Mock(BlobClient)
     mock_sdk_client._client = mock_generated_sdk_storage_client
     mock_sdk_client._pipeline = mock_pipeline
+    mock_sdk_client.get_blob_properties.return_value = blob_properties
     return mock_sdk_client
 
 
@@ -143,7 +146,7 @@ def mock_uuid4():
 
 
 def slice_bytes(content, range_value):
-    start, end = range_value.split("-")
+    start, end = range_value.split("-", 1)
     return content[int(start) : int(end) + 1]
 
 
@@ -152,6 +155,31 @@ def to_bytes_iterator(content, chunk_size=64 * 1024, exception_to_raise=None):
         yield content[i : i + chunk_size]
         if exception_to_raise is not None:
             raise exception_to_raise
+
+
+def mock_download_response(
+    expected_range, blob_length, content, exception=None, etag=None
+):
+    response = mock.MagicMock(spec=StreamDownloadGenerator)
+    response.response = mock.Mock()
+    response.response.headers = {
+        "Content-Range": f"bytes {expected_range}/{blob_length}",
+        "ETag": etag,
+    }
+    response.iter_content_func = to_bytes_iterator(
+        content=slice_bytes(content, expected_range), exception_to_raise=exception
+    )
+    response.__iter__.return_value = response.iter_content_func
+    return response
+
+
+def preset_blob_size_on_clients(
+    azstoragetorch_blob_client,
+    mock_sdk_blob_client,
+    blob_properties,
+):
+    mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+    azstoragetorch_blob_client.get_blob_size()
 
 
 class NonRetryableException(Exception):
@@ -602,17 +630,22 @@ class TestAzStorageTorchBlobClientFactory:
 
 class TestAzStorageTorchBlobClient:
     def assert_expected_download_calls(
-        self, mock_generated_sdk_storage_client, expected_ranges, expected_etag
+        self,
+        mock_generated_sdk_storage_client,
+        expected_ranges,
+        expected_etag,
+        known_blob_size=False,
     ):
-        expected_download_calls = [
-            mock.call(
-                range=f"bytes={expected_range}",
-                modified_access_conditions=ModifiedAccessConditions(
-                    if_match=expected_etag
-                ),
-            )
-            for expected_range in expected_ranges
-        ]
+        expected_download_calls = []
+        for i, expected_range in enumerate(expected_ranges):
+            download_kwargs = {
+                "range": f"bytes={expected_range}",
+            }
+            if i != 0 or known_blob_size:
+                download_kwargs["modified_access_conditions"] = (
+                    ModifiedAccessConditions(if_match=expected_etag)
+                )
+            expected_download_calls.append(mock.call(**download_kwargs))
         assert (
             mock_generated_sdk_storage_client.blob.download.call_args_list
             == expected_download_calls
@@ -733,26 +766,43 @@ class TestAzStorageTorchBlobClient:
             mock_executor.return_value.shutdown.assert_not_called()
 
     @pytest.mark.parametrize(
-        "blob_size, download_offset, download_length, expected_ranges",
+        "blob_size, download_offset, download_length, expected_ranges, known_blob_size",
         [
+            # Download an empty blob
+            (0, None, None, ["0--1"], True),
+            (0, None, None, [f"0-{DEFAULT_PARTITION_SIZE - 1}"], False),
             # Small single GET full, download
-            (10, None, None, ["0-9"]),
+            (10, None, None, ["0-9"], True),
+            (10, None, None, [f"0-{DEFAULT_PARTITION_SIZE - 1}"], False),
             # Small download with offset
-            (10, 5, None, ["5-9"]),
+            (10, 5, None, ["5-9"], True),
+            (10, 5, None, [f"5-{DEFAULT_PARTITION_SIZE + 5 - 1}"], False),
             # Small download with length
-            (10, 0, 5, ["0-4"]),
+            (10, 0, 5, ["0-4"], True),
+            (10, 0, 5, ["0-4"], False),
             # Small download with offset and length
-            (10, 3, 4, ["3-6"]),
+            (10, 3, 4, ["3-6"], True),
+            (10, 3, 4, ["3-6"], False),
             # Small download with length past blob size
-            (10, 5, 10, ["5-9"]),
+            (10, 5, 10, ["5-9"], True),
+            (10, 5, 10, ["5-14"], False),
             # Small download of portion of large blob
-            (32 * MB, 10, 10, ["10-19"]),
+            (32 * MB, 10, 10, ["10-19"], True),
+            (32 * MB, 10, 10, ["10-19"], False),
             # Download just below partitioned threshold
             (
                 DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1,
                 None,
                 None,
                 [f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 2}"],
+                True,
+            ),
+            (
+                DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1,
+                None,
+                None,
+                [f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1}"],
+                False,
             ),
             # Download at partitioned threshold
             (
@@ -760,6 +810,14 @@ class TestAzStorageTorchBlobClient:
                 None,
                 None,
                 [f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1}"],
+                True,
+            ),
+            (
+                DEFAULT_PARTITION_DOWNLOAD_THRESHOLD,
+                None,
+                None,
+                [f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1}"],
+                False,
             ),
             # Download just above partitioned threshold
             (
@@ -770,6 +828,17 @@ class TestAzStorageTorchBlobClient:
                     f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1}",
                     f"{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD}-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD}",
                 ],
+                True,
+            ),
+            (
+                DEFAULT_PARTITION_DOWNLOAD_THRESHOLD + 1,
+                None,
+                None,
+                [
+                    f"0-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD - 1}",
+                    f"{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD}-{DEFAULT_PARTITION_DOWNLOAD_THRESHOLD}",
+                ],
+                False,
             ),
             # Large download with multiple partitions
             (
@@ -782,6 +851,19 @@ class TestAzStorageTorchBlobClient:
                     f"{2 * DEFAULT_PARTITION_SIZE}-{3 * DEFAULT_PARTITION_SIZE - 1}",
                     f"{3 * DEFAULT_PARTITION_SIZE}-{4 * DEFAULT_PARTITION_SIZE - 1}",
                 ],
+                True,
+            ),
+            (
+                4 * DEFAULT_PARTITION_SIZE,
+                None,
+                None,
+                [
+                    f"0-{DEFAULT_PARTITION_SIZE - 1}",
+                    f"{DEFAULT_PARTITION_SIZE}-{2 * DEFAULT_PARTITION_SIZE - 1}",
+                    f"{2 * DEFAULT_PARTITION_SIZE}-{3 * DEFAULT_PARTITION_SIZE - 1}",
+                    f"{3 * DEFAULT_PARTITION_SIZE}-{4 * DEFAULT_PARTITION_SIZE - 1}",
+                ],
+                False,
             ),
             # Large download with offset
             (
@@ -794,6 +876,19 @@ class TestAzStorageTorchBlobClient:
                     f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (3 * DEFAULT_PARTITION_SIZE - 1)}",
                     f"{10 + (3 * DEFAULT_PARTITION_SIZE)}-{4 * DEFAULT_PARTITION_SIZE - 1}",
                 ],
+                True,
+            ),
+            (
+                4 * DEFAULT_PARTITION_SIZE,
+                10,
+                None,
+                [
+                    f"10-{10 + (DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + DEFAULT_PARTITION_SIZE}-{10 + (2 * DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (3 * DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + (3 * DEFAULT_PARTITION_SIZE)}-{4 * DEFAULT_PARTITION_SIZE - 1}",
+                ],
+                False,
             ),
             # Large download with length
             (
@@ -805,6 +900,18 @@ class TestAzStorageTorchBlobClient:
                     f"{DEFAULT_PARTITION_SIZE}-{2 * DEFAULT_PARTITION_SIZE - 1}",
                     f"{2 * DEFAULT_PARTITION_SIZE}-{2 * DEFAULT_PARTITION_SIZE + 4}",
                 ],
+                True,
+            ),
+            (
+                4 * DEFAULT_PARTITION_SIZE,
+                None,
+                2 * DEFAULT_PARTITION_SIZE + 5,
+                [
+                    f"0-{DEFAULT_PARTITION_SIZE - 1}",
+                    f"{DEFAULT_PARTITION_SIZE}-{2 * DEFAULT_PARTITION_SIZE - 1}",
+                    f"{2 * DEFAULT_PARTITION_SIZE}-{2 * DEFAULT_PARTITION_SIZE + 4}",
+                ],
+                False,
             ),
             # Large download with offset and length
             (
@@ -816,6 +923,18 @@ class TestAzStorageTorchBlobClient:
                     f"{10 + DEFAULT_PARTITION_SIZE}-{10 + (2 * DEFAULT_PARTITION_SIZE - 1)}",
                     f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (2 * DEFAULT_PARTITION_SIZE + 4)}",
                 ],
+                True,
+            ),
+            (
+                4 * DEFAULT_PARTITION_SIZE,
+                10,
+                2 * DEFAULT_PARTITION_SIZE + 5,
+                [
+                    f"10-{10 + (DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + DEFAULT_PARTITION_SIZE}-{10 + (2 * DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (2 * DEFAULT_PARTITION_SIZE + 4)}",
+                ],
+                False,
             ),
             # Large download with length past blob size
             (
@@ -828,6 +947,19 @@ class TestAzStorageTorchBlobClient:
                     f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (3 * DEFAULT_PARTITION_SIZE - 1)}",
                     f"{10 + (3 * DEFAULT_PARTITION_SIZE)}-{4 * DEFAULT_PARTITION_SIZE - 1}",
                 ],
+                True,
+            ),
+            (
+                4 * DEFAULT_PARTITION_SIZE,
+                10,
+                5 * DEFAULT_PARTITION_SIZE,
+                [
+                    f"10-{10 + (DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + DEFAULT_PARTITION_SIZE}-{10 + (2 * DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + (2 * DEFAULT_PARTITION_SIZE)}-{10 + (3 * DEFAULT_PARTITION_SIZE - 1)}",
+                    f"{10 + (3 * DEFAULT_PARTITION_SIZE)}-{4 * DEFAULT_PARTITION_SIZE - 1}",
+                ],
+                False,
             ),
         ],
     )
@@ -837,6 +969,7 @@ class TestAzStorageTorchBlobClient:
         download_offset,
         download_length,
         expected_ranges,
+        known_blob_size,
         azstoragetorch_blob_client,
         mock_sdk_blob_client,
         mock_generated_sdk_storage_client,
@@ -844,10 +977,13 @@ class TestAzStorageTorchBlobClient:
     ):
         blob_properties.size = blob_size
         mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
-
+        if known_blob_size:
+            azstoragetorch_blob_client.get_blob_size()
         content = random_bytes(blob_size)
         mock_generated_sdk_storage_client.blob.download.side_effect = [
-            to_bytes_iterator(slice_bytes(content, expected_range))
+            mock_download_response(
+                expected_range, blob_size, content, etag=blob_properties.etag
+            )
             for expected_range in expected_ranges
         ]
         download_kwargs = {}
@@ -866,20 +1002,29 @@ class TestAzStorageTorchBlobClient:
             mock_generated_sdk_storage_client,
             expected_ranges=expected_ranges,
             expected_etag=blob_properties.etag,
+            known_blob_size=known_blob_size,
         )
 
     @pytest.mark.parametrize(
-        "response_error_code,expected_sdk_exception,expected_storage_error_code",
+        "response_error_code,expected_sdk_exception,expected_storage_error_code,headers",
         [
             (
                 "BlobNotFound",
                 azure.core.exceptions.ResourceNotFoundError,
                 StorageErrorCode.BLOB_NOT_FOUND,
+                {"Content-Range": "bytes 1-4/12"}
             ),
             (
                 "ConditionNotMet",
                 azure.core.exceptions.ResourceModifiedError,
                 StorageErrorCode.CONDITION_NOT_MET,
+                {"Content-Range": "bytes 1-4/12"}
+            ),
+            (
+                "InvalidRange",
+                azure.core.exceptions.HttpResponseError,
+                StorageErrorCode.INVALID_RANGE,
+                {"Content-Range": "bytes */12"}
             ),
         ],
     )
@@ -893,6 +1038,7 @@ class TestAzStorageTorchBlobClient:
         response_error_code,
         expected_sdk_exception,
         expected_storage_error_code,
+        headers,
     ):
         http_response_error.response.text.return_value = (
             f'<?xml version="1.0" encoding="utf-8"?>'
@@ -902,12 +1048,39 @@ class TestAzStorageTorchBlobClient:
         )
 
         mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+        http_response_error.response.headers = headers
         mock_generated_sdk_storage_client.blob.download.side_effect = (
             http_response_error
         )
         with pytest.raises(expected_sdk_exception) as exc_info:
             azstoragetorch_blob_client.download()
         assert exc_info.value.error_code == expected_storage_error_code
+
+
+    def test_invalid_range_exception_size_zero(
+        self,
+        azstoragetorch_blob_client,
+        mock_sdk_blob_client,
+        mock_generated_sdk_storage_client,
+        blob_properties,
+        http_response_error,
+    ):
+        http_response_error.response.text.return_value = (
+            f'<?xml version="1.0" encoding="utf-8"?>'
+            f" <Error><Code>InvalidRange</Code>"
+            f" <Message>message</Message>"
+            f"</Error>"
+        )
+        blob_properties.size = 0
+        mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+        http_response_error.status_code = 416
+        http_response_error.response.headers = {"Content-Range": "bytes */0"}
+        mock_generated_sdk_storage_client.blob.download.side_effect = (
+            http_response_error
+        )
+        assert azstoragetorch_blob_client.download() == b""
+        assert azstoragetorch_blob_client.get_blob_size() == 0
+
 
     @pytest.mark.parametrize(
         "retryable_exception_cls", EXPECTED_RETRYABLE_READ_EXCEPTIONS
@@ -923,14 +1096,21 @@ class TestAzStorageTorchBlobClient:
     ):
         content = random_bytes(10)
         blob_properties.size = len(content)
-        mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+        download_kwargs = {}
+        download_kwargs["length"] = len(content)
+        preset_blob_size_on_clients(
+            azstoragetorch_blob_client, mock_sdk_blob_client, blob_properties
+        )
         mock_generated_sdk_storage_client.blob.download.side_effect = [
             to_bytes_iterator(content, exception_to_raise=retryable_exception_cls()),
             to_bytes_iterator(content),
         ]
-        assert azstoragetorch_blob_client.download() == content
+        assert azstoragetorch_blob_client.download(**download_kwargs) == content
         self.assert_expected_download_calls(
-            mock_generated_sdk_storage_client, ["0-9", "0-9"], blob_properties.etag
+            mock_generated_sdk_storage_client,
+            ["0-9", "0-9"],
+            blob_properties.etag,
+            True,
         )
         assert sleep_patch.call_count == 1
 
@@ -948,18 +1128,23 @@ class TestAzStorageTorchBlobClient:
     ):
         content = random_bytes(10)
         blob_properties.size = len(content)
-        mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+        download_kwargs = {}
+        download_kwargs["length"] = len(content)
+        preset_blob_size_on_clients(
+            azstoragetorch_blob_client, mock_sdk_blob_client, blob_properties
+        )
         mock_generated_sdk_storage_client.blob.download.side_effect = [
             to_bytes_iterator(content, exception_to_raise=retryable_exception_cls()),
             to_bytes_iterator(content, exception_to_raise=retryable_exception_cls()),
             to_bytes_iterator(content, exception_to_raise=retryable_exception_cls()),
         ]
         with pytest.raises(retryable_exception_cls):
-            azstoragetorch_blob_client.download()
+            azstoragetorch_blob_client.download(**download_kwargs)
         self.assert_expected_download_calls(
             mock_generated_sdk_storage_client,
             ["0-9", "0-9", "0-9"],
             blob_properties.etag,
+            True,
         )
         assert sleep_patch.call_count == 2
 
@@ -972,16 +1157,21 @@ class TestAzStorageTorchBlobClient:
     ):
         content = random_bytes(10)
         blob_properties.size = len(content)
-        mock_sdk_blob_client.get_blob_properties.return_value = blob_properties
+        download_kwargs = {}
+        download_kwargs["length"] = len(content)
+        preset_blob_size_on_clients(
+            azstoragetorch_blob_client, mock_sdk_blob_client, blob_properties
+        )
         mock_generated_sdk_storage_client.blob.download.side_effect = [
             to_bytes_iterator(content, exception_to_raise=NonRetryableException()),
         ]
         with pytest.raises(NonRetryableException):
-            azstoragetorch_blob_client.download()
+            azstoragetorch_blob_client.download(**download_kwargs)
         self.assert_expected_download_calls(
             mock_generated_sdk_storage_client,
             ["0-9"],
             blob_properties.etag,
+            True,
         )
 
     @pytest.mark.parametrize(

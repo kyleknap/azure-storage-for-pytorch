@@ -86,6 +86,7 @@ class BlobIO(io.IOBase):
             _client.STAGE_BLOCK_FUTURE_TYPE
         ] = []
         self._stage_block_exception: Optional[BaseException] = None
+        self._blob_size = None
 
     def close(self) -> None:
         """Close the file-like object.
@@ -307,11 +308,15 @@ class BlobIO(io.IOBase):
         client_factory = _client.AzStorageTorchBlobClientFactory(credential=credential)
         return client_factory.get_blob_client_from_url(blob_url)
 
+    def _get_blob_size(self):
+        if self._blob_size is None:
+            self._blob_size = self._client.get_blob_size()
+        return self._blob_size
+
     def _readline(self, size: Optional[int]) -> bytes:
         consumed = b""
-        if size == 0 or self._is_at_end_of_blob():
+        if size == 0 or self._is_at_end_of_blob(fetch_blob_size=False):
             return consumed
-
         limit = self._get_limit(size)
         if self._readline_buffer:
             consumed = self._consume_from_readline_buffer(consumed, limit)
@@ -351,16 +356,19 @@ class BlobIO(io.IOBase):
         return True
 
     def _read(self, size: Optional[int]) -> bytes:
-        if size == 0 or self._is_at_end_of_blob():
+        if size == 0 or self._is_at_end_of_blob(fetch_blob_size=False):
             return b""
         download_length = size
         if size is not None and size < 0:
             download_length = None
         content = self._client.download(offset=self._position, length=download_length)
         self._position += len(content)
+        self._blob_size = self._get_blob_size()
         return content
 
     def _seek(self, offset: int, whence: int) -> int:
+        if self._blob_size is None:
+            self._blob_size = self._get_blob_size()
         new_position = self._compute_new_position(offset, whence)
         if new_position < 0:
             raise ValueError("Cannot seek to negative position")
@@ -445,5 +453,7 @@ class BlobIO(io.IOBase):
     def _close_client(self) -> None:
         self._client.close()
 
-    def _is_at_end_of_blob(self) -> bool:
-        return self._position >= self._client.get_blob_size()
+    def _is_at_end_of_blob(self, fetch_blob_size=True) -> bool:
+        if fetch_blob_size:
+            self._get_blob_size()
+        return self._blob_size is not None and self._position >= self._blob_size

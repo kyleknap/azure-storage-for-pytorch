@@ -36,6 +36,11 @@ def large_blob(account_url, container_client):
 
 
 @pytest.fixture(scope="module")
+def empty_blob(account_url, container_client):
+    return upload_blob(account_url, container_client, b"")
+
+
+@pytest.fixture(scope="module")
 def small_with_newlines_blob(account_url, container_client):
     return upload_blob(account_url, container_client, sample_data_with_newlines(20, 2))
 
@@ -63,7 +68,8 @@ def upload_blob(account_url, container_client, data):
 class TestRead:
     @pytest.mark.parametrize(
         "blob",
-        [
+        [   
+            "empty",
             "small",
             "large",
         ],
