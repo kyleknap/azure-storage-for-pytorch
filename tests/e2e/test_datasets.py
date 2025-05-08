@@ -324,14 +324,18 @@ class TestDatasets:
             assert loaded_samples == dataset_case.expected_data_samples
 
     @pytest.mark.parametrize("dataset_cls", [BlobDataset, IterableBlobDataset])
-    def test_loader_with_workers(
+    def test_loader_with_workers_and_epochs(
         self, dataset_cls, create_dataset_case, all_case_kwargs
     ):
         dataset_case = create_dataset_case(dataset_cls, **all_case_kwargs)
         dataset = dataset_case.to_dataset()
         loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=4)
-        loaded_samples = list(loader)
-        assert loaded_samples == dataset_case.expected_data_samples
+        # Include multiple epochs to ensure the dataset is compatible when multiple
+        # processes are used as well as across dataloader iterations, which will
+        # create new workers/processes for each iteration.
+        for _ in range(2):
+            loaded_samples = list(loader)
+            assert loaded_samples == dataset_case.expected_data_samples
 
     @pytest.mark.parametrize("dataset_cls", [BlobDataset, IterableBlobDataset])
     def test_loader_with_batch_size(

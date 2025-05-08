@@ -114,7 +114,11 @@ class AzStorageTorchBlobClientFactory:
         blob_names = container_sdk_client.list_blob_names(name_starts_with=prefix)
         for blob_name in blob_names:
             blob_client = container_sdk_client.get_blob_client(blob_name)
-            yield AzStorageTorchBlobClient(blob_client)
+            # Throwaway the blob client for it's URL to ensure we are **not**
+            # sharing transports as list_blob_names() may happen in the parent
+            # process and calling fork() after can lead to unintentional resource
+            # sharing in child processes.
+            yield self.get_blob_client_from_url(blob_client.url)
 
     def _get_sdk_credential(
         self, credential: AZSTORAGETORCH_CREDENTIAL_TYPE
@@ -149,26 +153,28 @@ class AzStorageTorchBlobClientFactory:
     ) -> azure.storage.blob.ContainerClient:
         client = azure.storage.blob.ContainerClient.from_container_url(
             container_url,
-            **self._get_sdk_client_kwargs(container_url),
+            **self._get_sdk_client_kwargs(container_url, share_transport=False),
         )
-        self._cache_pipeline_if_needed(client, container_url)
         return client
 
-    def _get_sdk_client_kwargs(self, resource_url: str) -> SDKKwargsType:
+    def _get_sdk_client_kwargs(
+        self, resource_url: str, share_transport: bool = True
+    ) -> SDKKwargsType:
         kwargs: SDKKwargsType = {
-            "transport": self._transport,
             "user_agent": f"azstoragetorch/{__version__}",
             "_additional_pipeline_policies": [
                 EchoClientRequestIdPolicy(),
             ],
         }
+        if share_transport:
+            kwargs["transport"] = self._transport
         credential = self._sdk_credential
         if self._url_has_sas_token(resource_url):
             # The SDK prefers the explict credential over the one in the URL. So if a SAS token is
             # in the URL, we do not want the factory to automatically inject its credential, especially
             # if it would have been the default credential.
             credential = None
-        elif self._pipeline is not None:
+        elif share_transport and self._pipeline is not None:
             # We only want to share pipelines if we previously created a shareable pipeline and if
             # the resource URL provided does not have a SAS token override, which would require a new
             # pipeline since different credential policies are used based on credential provided.
