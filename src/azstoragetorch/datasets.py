@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 
 from collections.abc import Callable, Iterable, Iterator
+import functools
 from typing import Optional, Union, TypedDict
 from typing_extensions import Self, TypeVar
 
@@ -135,7 +136,7 @@ class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
         blobs: Iterable[Blob],
         transform: Optional[Callable[[Blob], _TransformOutputType_co]] = None,
     ):
-        self._blobs = list(blobs)
+        self._blobs_iterable = blobs
         if transform is None:
             transform = _default_transform
         self._transform = transform
@@ -229,6 +230,14 @@ class BlobDataset(torch.utils.data.Dataset[_TransformOutputType_co]):
         :returns: The number of blobs in the dataset.
         """
         return len(self._blobs)
+
+    @functools.cached_property
+    def _blobs(self) -> list[Blob]:
+        # Property to lazily load blobs on retrieval of data samples instead of at
+        # dataset instantiation. For dataloaders with multiple workers, it ensures
+        # that any API requests are made as part of child processes instead of both
+        # the parent and child processes, which is unsafe under our current transport.
+        return list(self._blobs_iterable)
 
 
 class IterableBlobDataset(torch.utils.data.IterableDataset[_TransformOutputType_co]):

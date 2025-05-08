@@ -151,6 +151,7 @@ class TestBlobDataset:
     ):
         mock_azstoragetorch_blob_client_factory.yield_blob_clients_from_container_url.return_value = data_sample_blob_clients
         dataset = BlobDataset.from_container_url(container_url)
+        assert not mock_azstoragetorch_blob_client_factory.yield_blob_clients_from_container_url.called
         self.assert_expected_dataset(dataset, expected_data_samples=data_samples)
         self.assert_factory_calls_from_container_url(
             mock_azstoragetorch_blob_client_factory,
@@ -220,6 +221,7 @@ class TestBlobDataset:
             data_sample_blob_clients
         )
         dataset = BlobDataset.from_blob_urls(data_sample_blob_urls)
+        assert not mock_azstoragetorch_blob_client_factory.get_blob_client_from_url.called
         self.assert_expected_dataset(dataset, expected_data_samples=data_samples)
         self.assert_factory_calls_from_blob_urls(
             mock_azstoragetorch_blob_client_factory,

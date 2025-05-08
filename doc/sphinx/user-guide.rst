@@ -104,8 +104,8 @@ of PyTorch datasets, `map-style and iterable-style datasets <PyTorch dataset typ
 to load data samples from Azure Blob Storage:
 
 * :py:class:`azstoragetorch.datasets.BlobDataset` - `Map-style dataset <PyTorch dataset map-style_>`_.
-  Use this class for random access to data samples. The class eagerly lists samples in
-  dataset on instantiation.
+  Use this class for random access to data samples. The class eagerly lists all samples in
+  dataset on first access of the dataset.
 
 * :py:class:`azstoragetorch.datasets.IterableBlobDataset` - `Iterable-style dataset <PyTorch dataset iterable-style_>`_.
   Use this class when working with large datasets that may not fit in memory. The class
