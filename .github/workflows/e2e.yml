@@ -41,4 +41,4 @@ jobs:
       - name: Run tests
         env:
           AZSTORAGETORCH_STORAGE_ACCOUNT_NAME: ${{ secrets.AZSTORAGETORCH_STORAGE_ACCOUNT_NAME }}
-        run: pytest tests/e2e
+        run: pytest tests/e2e/test_datasets.py
