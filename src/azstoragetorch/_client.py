@@ -28,9 +28,11 @@ import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
 from azure.core.pipeline import Pipeline
+from azure.core.pipeline.policies import SansIOHTTPPolicy
 from azure.core.pipeline.transport import RequestsTransport
 
 from azstoragetorch._version import __version__
+from azstoragetorch.exceptions import ClientRequestIdMismatchError
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +53,38 @@ class SDKKwargsType(TypedDict, total=False):
     transport: RequestsTransport
     user_agent: str
     credential: SDK_CREDENTIAL_TYPE
+
+
+# Policy to ensure that request made by the client matches responses returned. This
+# is an extra guard rail to ensure when using an azstoragetorch interface with processes
+# customers will not successfully process a response from a different request because
+# the underlying connection resource was shared as part of forking:
+# https://github.com/psf/requests/issues/4323
+#
+# The SDK has a policy that injects the client request ID but does not validate it echoes
+# back. If the SDK was to enable this in the future, we should consider removing this policy
+# in favor of the SDK's.
+class EchoClientRequestIdPolicy(SansIOHTTPPolicy):
+    _CLIENT_REQUEST_ID_HEADER_NAME = "x-ms-client-request-id"
+
+    def on_request(self, request):
+        request.http_request.headers[self._CLIENT_REQUEST_ID_HEADER_NAME] = str(
+            uuid.uuid4()
+        )
+
+    def on_response(self, request, response):
+        request_client_id = request.http_request.headers[
+            self._CLIENT_REQUEST_ID_HEADER_NAME
+        ]
+        response_client_id = response.http_response.headers[
+            self._CLIENT_REQUEST_ID_HEADER_NAME
+        ]
+        if request_client_id != response_client_id:
+            raise ClientRequestIdMismatchError(
+                request_client_id=request_client_id,
+                response_client_id=response_client_id,
+                service_request_id=response.http_response.headers["x-ms-request-id"],
+            )
 
 
 class AzStorageTorchBlobClientFactory:
@@ -124,6 +158,9 @@ class AzStorageTorchBlobClientFactory:
         kwargs: SDKKwargsType = {
             "transport": self._transport,
             "user_agent": f"azstoragetorch/{__version__}",
+            "_additional_pipeline_policies": [
+                EchoClientRequestIdPolicy(),
+            ],
         }
         credential = self._sdk_credential
         if self._url_has_sas_token(resource_url):
