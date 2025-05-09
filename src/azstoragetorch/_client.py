@@ -28,9 +28,11 @@ import azure.storage.blob
 import azure.storage.blob._generated.models
 from azure.storage.blob._shared.response_handlers import process_storage_error
 from azure.core.pipeline import Pipeline
+from azure.core.pipeline.policies import SansIOHTTPPolicy
 from azure.core.pipeline.transport import RequestsTransport
 
 from azstoragetorch._version import __version__
+from azstoragetorch.exceptions import ClientRequestIdMismatchError
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +53,38 @@ class SDKKwargsType(TypedDict, total=False):
     transport: RequestsTransport
     user_agent: str
     credential: SDK_CREDENTIAL_TYPE
+
+
+# Policy to ensure that request made by the client matches responses returned. This
+# is an extra guard rail to ensure when using an azstoragetorch interface with processes
+# customers will not successfully process a response from a different request because
+# the underlying connection resource was shared as part of forking:
+# https://github.com/psf/requests/issues/4323
+#
+# The SDK has a policy that injects the client request ID but does not validate it echoes
+# back. If the SDK was to enable this in the future, we should consider removing this policy
+# in favor of the SDK's.
+class EchoClientRequestIdPolicy(SansIOHTTPPolicy):
+    _CLIENT_REQUEST_ID_HEADER_NAME = "x-ms-client-request-id"
+
+    def on_request(self, request):
+        request.http_request.headers[self._CLIENT_REQUEST_ID_HEADER_NAME] = str(
+            uuid.uuid4()
+        )
+
+    def on_response(self, request, response):
+        request_client_id = request.http_request.headers[
+            self._CLIENT_REQUEST_ID_HEADER_NAME
+        ]
+        response_client_id = response.http_response.headers[
+            self._CLIENT_REQUEST_ID_HEADER_NAME
+        ]
+        if request_client_id != response_client_id:
+            raise ClientRequestIdMismatchError(
+                request_client_id=request_client_id,
+                response_client_id=response_client_id,
+                service_request_id=response.http_response.headers["x-ms-request-id"],
+            )
 
 
 class AzStorageTorchBlobClientFactory:
@@ -80,7 +114,11 @@ class AzStorageTorchBlobClientFactory:
         blob_names = container_sdk_client.list_blob_names(name_starts_with=prefix)
         for blob_name in blob_names:
             blob_client = container_sdk_client.get_blob_client(blob_name)
-            yield AzStorageTorchBlobClient(blob_client)
+            # Throwaway the blob client for it's URL to ensure we are **not**
+            # sharing transports as list_blob_names() may happen in the parent
+            # process and calling fork() after can lead to unintentional resource
+            # sharing in child processes.
+            yield self.get_blob_client_from_url(blob_client.url)
 
     def _get_sdk_credential(
         self, credential: AZSTORAGETORCH_CREDENTIAL_TYPE
@@ -115,23 +153,28 @@ class AzStorageTorchBlobClientFactory:
     ) -> azure.storage.blob.ContainerClient:
         client = azure.storage.blob.ContainerClient.from_container_url(
             container_url,
-            **self._get_sdk_client_kwargs(container_url),
+            **self._get_sdk_client_kwargs(container_url, share_transport=False),
         )
-        self._cache_pipeline_if_needed(client, container_url)
         return client
 
-    def _get_sdk_client_kwargs(self, resource_url: str) -> SDKKwargsType:
+    def _get_sdk_client_kwargs(
+        self, resource_url: str, share_transport: bool = True
+    ) -> SDKKwargsType:
         kwargs: SDKKwargsType = {
-            "transport": self._transport,
             "user_agent": f"azstoragetorch/{__version__}",
+            "_additional_pipeline_policies": [
+                EchoClientRequestIdPolicy(),
+            ],
         }
+        if share_transport:
+            kwargs["transport"] = self._transport
         credential = self._sdk_credential
         if self._url_has_sas_token(resource_url):
             # The SDK prefers the explict credential over the one in the URL. So if a SAS token is
             # in the URL, we do not want the factory to automatically inject its credential, especially
             # if it would have been the default credential.
             credential = None
-        elif self._pipeline is not None:
+        elif share_transport and self._pipeline is not None:
             # We only want to share pipelines if we previously created a shareable pipeline and if
             # the resource URL provided does not have a SAS token override, which would require a new
             # pipeline since different credential policies are used based on credential provided.

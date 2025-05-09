@@ -29,3 +29,35 @@ class FatalBlobIOWriteError(AZStorageTorchError):
         super().__init__(
             self._MSG_FORMAT.format(underlying_exception=underlying_exception)
         )
+
+
+class ClientRequestIdMismatchError(AZStorageTorchError):
+    """Raised when a client request ID in a response does not match the ID in it's originating request.
+
+    If receiving this error as part of using both an azstoragetorch dataset and a
+    PyTorch DataLoader, it may be because the dataset is being accessed in both the
+    main process and a DataLoader's worker process. This can cause unintentional
+    sharing of resources. To fix this error, consider not accessing the dataset's
+    samples in the main process or not using workers with the DataLoader.
+    """
+
+    _MSG_FORMAT = (
+        "Client request ID: {request_client_id} does not match echoed client request ID: "
+        "{response_client_id}.  Service request ID: {service_request_id}. "
+        "If receiving this error as part of using both an azstoragetorch dataset and a "
+        "PyTorch DataLoader, it may be because the dataset is being accessed in both the "
+        "main process and a DataLoader's worker process. This can cause unintentional "
+        "sharing of resources. To fix this error, consider not accessing the dataset's "
+        "samples in the main process or not using workers with the DataLoader."
+    )
+
+    def __init__(
+        self, request_client_id: str, response_client_id: str, service_request_id: str
+    ):
+        super().__init__(
+            self._MSG_FORMAT.format(
+                request_client_id=request_client_id,
+                response_client_id=response_client_id,
+                service_request_id=service_request_id,
+            )
+        )

@@ -8,11 +8,12 @@ import copy
 from unittest import mock
 import os
 import threading
+import urllib.parse
 import pytest
 
 from azure.core.credentials import AzureSasCredential, AzureNamedKeyCredential
 import azure.core.exceptions
-from azure.core.pipeline.transport import HttpResponse
+from azure.core.pipeline.transport import HttpRequest, HttpResponse
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import (
     BlobClient,
@@ -25,12 +26,15 @@ from azure.storage.blob._generated._azure_blob_storage import AzureBlobStorage
 from azure.storage.blob._generated.operations import BlobOperations
 from azure.storage.blob._generated.models import ModifiedAccessConditions
 from azure.core.pipeline import Pipeline
+from azure.core.pipeline import PipelineRequest, PipelineResponse
 from azure.core.pipeline.transport import RequestsTransport
 
 from azstoragetorch._client import (
     AzStorageTorchBlobClient,
     AzStorageTorchBlobClientFactory,
+    EchoClientRequestIdPolicy,
 )
+from azstoragetorch.exceptions import ClientRequestIdMismatchError
 from tests.unit.utils import random_bytes
 from azstoragetorch._version import __version__
 from azure.core.pipeline.transport._requests_basic import StreamDownloadGenerator
@@ -89,12 +93,14 @@ def mock_generated_sdk_storage_client():
 
 
 @pytest.fixture
-
-def mock_sdk_blob_client(mock_generated_sdk_storage_client, mock_pipeline, blob_properties):
+def mock_sdk_blob_client(
+    mock_generated_sdk_storage_client, mock_pipeline, blob_properties, blob_url
+):
     mock_sdk_client = mock.Mock(BlobClient)
     mock_sdk_client._client = mock_generated_sdk_storage_client
     mock_sdk_client._pipeline = mock_pipeline
     mock_sdk_client.get_blob_properties.return_value = blob_properties
+    mock_sdk_client.url = blob_url
     return mock_sdk_client
 
 
@@ -112,8 +118,15 @@ def mock_sdk_container_client(
 
 
 @pytest.fixture
-def mock_sdk_blob_clients_from_blob_names(mock_sdk_blob_client, blob_names):
-    return [copy.copy(mock_sdk_blob_client) for _ in blob_names]
+def mock_sdk_blob_clients_from_blob_names(
+    mock_sdk_blob_client, blob_names, container_url
+):
+    mock_clients = []
+    for blob_name in blob_names:
+        mock_client = copy.copy(mock_sdk_blob_client)
+        mock_client.url = f"{container_url}/{blob_name}"
+        mock_clients.append(mock_client)
+    return mock_clients
 
 
 @pytest.fixture
@@ -143,6 +156,29 @@ def http_response_error(blob_url):
 def mock_uuid4():
     with mock.patch("uuid.uuid4") as mock_uuid:
         yield mock_uuid
+
+
+@pytest.fixture
+def echo_client_request_id_policy():
+    return EchoClientRequestIdPolicy()
+
+
+@pytest.fixture
+def mock_pipeline_request():
+    pipeline_request = mock.Mock(PipelineRequest)
+    pipeline_request.http_request = mock.Mock(HttpRequest)
+    pipeline_request.http_request.headers = {}
+    return pipeline_request
+
+
+@pytest.fixture
+def mock_pipeline_response():
+    pipeline_response = mock.Mock(PipelineResponse)
+    pipeline_response.http_response = mock.Mock(HttpResponse)
+    pipeline_response.http_response.headers = {
+        "x-ms-request-id": "request-id",
+    }
+    return pipeline_response
 
 
 def slice_bytes(content, range_value):
@@ -212,6 +248,57 @@ class SpySubmitExcecutor(concurrent.futures.ThreadPoolExecutor):
         return super().submit(fn, *args, **kwargs)
 
 
+class TestEchoClientRequestIdPolicy:
+    def test_adds_client_request_id(
+        self, echo_client_request_id_policy, mock_pipeline_request, mock_uuid4
+    ):
+        mock_uuid4.return_value = "unique-id"
+        echo_client_request_id_policy.on_request(mock_pipeline_request)
+        mock_uuid4.assert_called_once()
+        assert (
+            mock_pipeline_request.http_request.headers["x-ms-client-request-id"]
+            == "unique-id"
+        )
+
+    def test_throws_if_client_request_id_mismatch(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+    ):
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        mock_pipeline_response.http_response.headers["x-ms-client-request-id"] = (
+            "does-not-match"
+        )
+        with pytest.raises(ClientRequestIdMismatchError):
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+
+    def test_does_not_raise_if_client_request_id_matches(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+    ):
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        mock_pipeline_response.http_response.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        try:
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+        except ClientRequestIdMismatchError as e:
+            pytest.fail(
+                f"Client request ID should match but received: {e}"
+            )
+
+
 class TestAzStorageTorchBlobClientFactory:
     @pytest.fixture(autouse=True)
     def sdk_blob_client_patch(self, mock_sdk_blob_client):
@@ -243,7 +330,9 @@ class TestAzStorageTorchBlobClientFactory:
         self, mock_sdk_container_client, **kwargs
     ):
         self.assert_expected_from_url_call(
-            mock_sdk_container_client.from_container_url, **kwargs
+            mock_sdk_container_client.from_container_url,
+            expected_transport=None,
+            **kwargs,
         )
 
     def assert_expected_from_url_call(
@@ -259,11 +348,13 @@ class TestAzStorageTorchBlobClientFactory:
     def assert_expected_sdk_blob_clients_from_container_url(
         self,
         mock_sdk_container_client,
+        mock_sdk_blob_client,
         expected_url,
         expected_blob_names_used,
         expected_prefix=None,
         expected_credential=mock.ANY,
         expected_credentials_cls=None,
+        expected_sdk_blob_client_pipeline=mock.ANY,
     ):
         self.assert_expected_from_container_url_call(
             mock_sdk_container_client,
@@ -281,6 +372,13 @@ class TestAzStorageTorchBlobClientFactory:
         assert mock_sdk_container_client.get_blob_client.call_args_list == [
             mock.call(blob_name) for blob_name in expected_blob_names_used
         ]
+        self.assert_expected_from_blob_url_calls(
+            mock_sdk_blob_client,
+            expected_container_url=expected_url,
+            expected_blob_names_used=expected_blob_names_used,
+            expected_credential=expected_credential,
+            expected_pipeline=expected_sdk_blob_client_pipeline,
+        )
 
     def assert_expected_underlying_sdk_blob_clients(
         self,
@@ -291,6 +389,40 @@ class TestAzStorageTorchBlobClientFactory:
             mock.call(sdk_blob_client) for sdk_blob_client in expected_blob_sdk_clients
         ]
 
+    def assert_expected_from_blob_url_calls(
+        self,
+        mock_sdk_blob_client,
+        expected_container_url,
+        expected_blob_names_used,
+        expected_credential=mock.ANY,
+        expected_pipeline=mock.ANY,
+    ):
+        expected_calls = []
+        container_url_parts = urllib.parse.urlparse(expected_container_url)
+        for i, expected_blob_name in enumerate(expected_blob_names_used):
+            expected_blob_url = urllib.parse.urlunparse(
+                (
+                    container_url_parts.scheme,
+                    container_url_parts.netloc,
+                    f"{container_url_parts.path}/{expected_blob_name}",
+                    container_url_parts.params,
+                    container_url_parts.query,
+                    container_url_parts.fragment,
+                )
+            )
+            expected_from_url_kwargs = self.get_expected_from_url_kwargs(
+                expected_credential=expected_credential,
+            )
+            if expected_pipeline and i != 0:
+                # For the blob clients, pipelines should be shared. So the first blob
+                # client created will have its pipeline cached and reused for
+                # subsequent blob clients.
+                expected_from_url_kwargs["_pipeline"] = expected_pipeline
+            expected_calls.append(
+                mock.call(expected_blob_url, **expected_from_url_kwargs)
+            )
+        assert mock_sdk_blob_client.from_blob_url.call_args_list == expected_calls
+
     def get_expected_from_url_kwargs(
         self,
         expected_credential=mock.ANY,
@@ -299,9 +431,13 @@ class TestAzStorageTorchBlobClientFactory:
     ):
         expected_from_url_kwargs = {
             "credential": expected_credential,
-            "transport": expected_transport,
             "user_agent": f"azstoragetorch/{__version__}",
+            "_additional_pipeline_policies": [
+                mock.ANY,
+            ],
         }
+        if expected_transport is not None:
+            expected_from_url_kwargs["transport"] = expected_transport
         if expected_pipeline is not None:
             expected_from_url_kwargs["_pipeline"] = expected_pipeline
         return expected_from_url_kwargs
@@ -318,6 +454,11 @@ class TestAzStorageTorchBlobClientFactory:
 
     def get_transport_used(self, mock_sdk_blob_client):
         return self.get_sdk_kwarg_used(mock_sdk_blob_client, "transport")
+
+    def get_additional_pipeline_policies_used(self, mock_sdk_blob_client):
+        return self.get_sdk_kwarg_used(
+            mock_sdk_blob_client, "_additional_pipeline_policies"
+        )
 
     def get_sdk_kwarg_used(
         self, mock_sdk_client, kwarg_name, from_url_method_name="from_blob_url"
@@ -501,50 +642,72 @@ class TestAzStorageTorchBlobClientFactory:
             mock.call(blob_url_with_sas, **self.get_expected_from_url_kwargs()),
         ]
 
-    def test_reuse_pipeline_across_client_types(
+    def test_does_not_reuse_pipeline_for_container_clients(
         self,
         container_url,
         blob_url,
         mock_sdk_container_client,
         mock_sdk_blob_client,
         mock_pipeline,
+        blob_name,
+        blob_names,
+        mock_sdk_blob_clients_from_blob_names,
     ):
         factory = AzStorageTorchBlobClientFactory()
-        # Undo default side effect on mock container client to be able to call
-        # yield_blob_clients_from_container_url multiple times without having to
-        # reconstruct consumed side effect.
-        mock_sdk_container_client.get_blob_client.side_effect = None
-        mock_sdk_container_client.get_blob_client.return_value = mock_sdk_blob_client
+        mock_sdk_container_client.get_blob_client.side_effect = (
+            mock_sdk_blob_clients_from_blob_names * 2
+        )
 
         list(factory.yield_blob_clients_from_container_url(container_url))
         factory.get_blob_client_from_url(blob_url)
         list(factory.yield_blob_clients_from_container_url(container_url))
 
-        # Out of the container clients created, the second one should have used the
-        # shared pipeline.
+        # None of the container clients created should use a shared pipeline
+        # nor a shared transport.
+        expected_from_container_url_kwargs = self.get_expected_from_url_kwargs(
+            expected_transport=None,
+            expected_pipeline=None,
+        )
         assert mock_sdk_container_client.from_container_url.call_args_list == [
-            mock.call(container_url, **self.get_expected_from_url_kwargs()),
-            mock.call(
-                container_url,
-                **self.get_expected_from_url_kwargs(expected_pipeline=mock_pipeline),
-            ),
+            mock.call(container_url, **expected_from_container_url_kwargs),
+            mock.call(container_url, **expected_from_container_url_kwargs),
         ]
 
-        # The one blob client created from get_blob_client_from_url call should have used
-        # pipeline from the first container client
-        self.assert_expected_from_blob_url_call(
-            mock_sdk_blob_client, expected_url=blob_url, expected_pipeline=mock_pipeline
+        # For the blob clients, we still want to share pipelines so we will cache the
+        # pipeline of the first client and reuse for the rest of them including the clients
+        # created from a container client
+        expected_blob_names = blob_names + [blob_name] + blob_names
+        self.assert_expected_from_blob_url_calls(
+            mock_sdk_blob_client,
+            expected_container_url=container_url,
+            expected_blob_names_used=expected_blob_names,
+            expected_pipeline=mock_pipeline,
         )
+
+    def test_injects_echo_client_request_id_policy(
+        self, blob_url, mock_sdk_blob_client
+    ):
+        factory = AzStorageTorchBlobClientFactory()
+        factory.get_blob_client_from_url(blob_url)
+        additional_policies = self.get_additional_pipeline_policies_used(
+            mock_sdk_blob_client
+        )
+        assert len(additional_policies) == 1
+        assert isinstance(additional_policies[0], EchoClientRequestIdPolicy)
 
     def test_yield_blob_clients_from_container_url(
         self,
         container_url,
         mock_sdk_container_client,
+        mock_sdk_blob_client,
         azstoragetorch_blob_client_cls_patch,
         blob_names,
         mock_sdk_blob_clients_from_blob_names,
     ):
         factory = AzStorageTorchBlobClientFactory()
+        mock_sdk_blob_client.from_blob_url.side_effect = (
+            mock_sdk_blob_clients_from_blob_names
+        )
         mock_azstorage_blob_clients = self.get_mock_azstoragetorch_blob_clients(
             blob_names
         )
@@ -555,6 +718,7 @@ class TestAzStorageTorchBlobClientFactory:
         assert blob_clients == mock_azstorage_blob_clients
         self.assert_expected_sdk_blob_clients_from_container_url(
             mock_sdk_container_client,
+            mock_sdk_blob_client,
             expected_url=container_url,
             expected_blob_names_used=blob_names,
             expected_prefix=None,
@@ -569,6 +733,7 @@ class TestAzStorageTorchBlobClientFactory:
         self,
         container_url,
         mock_sdk_container_client,
+        mock_sdk_blob_client,
         blob_names,
     ):
         factory = AzStorageTorchBlobClientFactory()
@@ -579,6 +744,7 @@ class TestAzStorageTorchBlobClientFactory:
         )
         self.assert_expected_sdk_blob_clients_from_container_url(
             mock_sdk_container_client,
+            mock_sdk_blob_client,
             expected_url=container_url,
             expected_blob_names_used=blob_names,
             expected_prefix="prefix",
@@ -588,6 +754,7 @@ class TestAzStorageTorchBlobClientFactory:
         self,
         container_url,
         mock_sdk_container_client,
+        mock_sdk_blob_client,
         blob_names,
     ):
         credential = AzureSasCredential("sas")
@@ -595,6 +762,7 @@ class TestAzStorageTorchBlobClientFactory:
         list(factory.yield_blob_clients_from_container_url(container_url))
         self.assert_expected_sdk_blob_clients_from_container_url(
             mock_sdk_container_client,
+            mock_sdk_blob_client,
             expected_url=container_url,
             expected_blob_names_used=blob_names,
             expected_credential=credential,
@@ -604,28 +772,42 @@ class TestAzStorageTorchBlobClientFactory:
         self,
         container_url,
         mock_sdk_container_client,
+        mock_sdk_blob_client,
         blob_names,
     ):
         factory = AzStorageTorchBlobClientFactory(credential=False)
         list(factory.yield_blob_clients_from_container_url(container_url))
         self.assert_expected_sdk_blob_clients_from_container_url(
             mock_sdk_container_client,
+            mock_sdk_blob_client,
             expected_url=container_url,
             expected_blob_names_used=blob_names,
             expected_credential=None,
         )
 
     def test_yield_blob_clients_from_container_url_with_sas_in_url(
-        self, container_url, mock_sdk_container_client, blob_names, sas_token
+        self,
+        container_url,
+        mock_sdk_container_client,
+        mock_sdk_blob_client,
+        blob_names,
+        mock_sdk_blob_clients_from_blob_names,
+        sas_token,
     ):
         container_url_with_sas = f"{container_url}?{sas_token}"
+        for mock_blob_client, blob_name in zip(
+            mock_sdk_blob_clients_from_blob_names, blob_names
+        ):
+            mock_blob_client.url = f"{container_url}/{blob_name}?{sas_token}"
         factory = AzStorageTorchBlobClientFactory()
         list(factory.yield_blob_clients_from_container_url(container_url_with_sas))
         self.assert_expected_sdk_blob_clients_from_container_url(
             mock_sdk_container_client,
+            mock_sdk_blob_client,
             expected_url=container_url_with_sas,
             expected_blob_names_used=blob_names,
             expected_credential=None,
+            expected_sdk_blob_client_pipeline=None,
         )
 
 
@@ -1013,19 +1195,19 @@ class TestAzStorageTorchBlobClient:
                 "BlobNotFound",
                 azure.core.exceptions.ResourceNotFoundError,
                 StorageErrorCode.BLOB_NOT_FOUND,
-                {"Content-Range": "bytes 1-4/12"}
+                {"Content-Range": "bytes 1-4/12"},
             ),
             (
                 "ConditionNotMet",
                 azure.core.exceptions.ResourceModifiedError,
                 StorageErrorCode.CONDITION_NOT_MET,
-                {"Content-Range": "bytes 1-4/12"}
+                {"Content-Range": "bytes 1-4/12"},
             ),
             (
                 "InvalidRange",
                 azure.core.exceptions.HttpResponseError,
                 StorageErrorCode.INVALID_RANGE,
-                {"Content-Range": "bytes */12"}
+                {"Content-Range": "bytes */12"},
             ),
         ],
     )
@@ -1057,7 +1239,6 @@ class TestAzStorageTorchBlobClient:
             azstoragetorch_blob_client.download()
         assert exc_info.value.error_code == expected_storage_error_code
 
-
     def test_invalid_range_exception_size_zero(
         self,
         azstoragetorch_blob_client,
@@ -1081,7 +1262,6 @@ class TestAzStorageTorchBlobClient:
         )
         assert azstoragetorch_blob_client.download() == b""
         assert azstoragetorch_blob_client.get_blob_size() == 0
-
 
     @pytest.mark.parametrize(
         "retryable_exception_cls", EXPECTED_RETRYABLE_READ_EXCEPTIONS
