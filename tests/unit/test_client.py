@@ -30,6 +30,7 @@ from azure.core.pipeline import PipelineRequest, PipelineResponse
 from azure.core.pipeline.transport import RequestsTransport
 
 from azstoragetorch._client import (
+    ALLOW_MISSING_CLIENT_REQUEST_ID_ENV_VAR,
     AzStorageTorchBlobClient,
     AzStorageTorchBlobClientFactory,
     EchoClientRequestIdPolicy,
@@ -295,6 +296,43 @@ class TestEchoClientRequestIdPolicy:
             )
         except ClientRequestIdMismatchError as e:
             pytest.fail(f"Client request ID should match but received: {e}")
+
+    @pytest.mark.parametrize("env_value", [None, "false", "1"])
+    def test_throws_if_response_omits_client_request_id(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+        monkeypatch,
+        env_value,
+    ):
+        if env_value is not None:
+            monkeypatch.setenv(ALLOW_MISSING_CLIENT_REQUEST_ID_ENV_VAR, env_value)
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        with pytest.raises(ClientRequestIdMismatchError):
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+
+    def test_allows_missing_client_request_id_when_configured(
+        self,
+        echo_client_request_id_policy,
+        mock_pipeline_request,
+        mock_pipeline_response,
+        monkeypatch,
+    ):
+        monkeypatch.setenv(ALLOW_MISSING_CLIENT_REQUEST_ID_ENV_VAR, "true")
+        mock_pipeline_request.http_request.headers["x-ms-client-request-id"] = (
+            "unique-id"
+        )
+        assert (
+            echo_client_request_id_policy.on_response(
+                mock_pipeline_request, mock_pipeline_response
+            )
+            is None
+        )
 
 
 class TestAzStorageTorchBlobClientFactory:
